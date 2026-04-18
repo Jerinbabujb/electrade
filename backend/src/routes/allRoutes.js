@@ -765,13 +765,19 @@ module.exports.companiesRouter = (() => {
     }
   })
 
+  // Helper: require caller to be admin of the target company (not just any member)
+  const requireAdminOfCompany = async (userId, companyId) => {
+    const { rows: [row] } = await db.query(
+      `SELECT role FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+      [userId, companyId])
+    if (!row)             throw Object.assign(new Error('No access to this company'),          { _status: 403 })
+    if (row.role !== 'admin') throw Object.assign(new Error('Admin role required for this company'), { _status: 403 })
+  }
+
   // GET /companies/:id/users — list users with access to a specific company
   r.get('/:id/users', async (req, res, next) => {
     try {
-      const { rows: [access] } = await db.query(
-        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
-        [req.user.id, req.params.id])
-      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+      await requireAdminOfCompany(req.user.id, req.params.id)
 
       const { rows } = await db.query(
         `SELECT u.id, u.name, u.email, uc.role, u.is_active, uc.is_default, u.last_login
@@ -781,7 +787,10 @@ module.exports.companiesRouter = (() => {
          ORDER BY u.name`,
         [req.params.id])
       res.json({ data: rows })
-    } catch (err) { next(err) }
+    } catch (err) {
+      if (err._status) return res.status(err._status).json({ error: { message: err.message } })
+      next(err)
+    }
   })
 
   // POST /companies/:id/users — grant an existing user access by email
@@ -790,10 +799,7 @@ module.exports.companiesRouter = (() => {
       const { email, role } = req.body
       if (!email) return res.status(400).json({ error: { message: 'Email required' } })
 
-      const { rows: [access] } = await db.query(
-        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
-        [req.user.id, req.params.id])
-      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+      await requireAdminOfCompany(req.user.id, req.params.id)
 
       const { rows: [target] } = await db.query(
         `SELECT id, name, email FROM users WHERE email=$1 AND is_active=true`,
@@ -807,18 +813,22 @@ module.exports.companiesRouter = (() => {
         [uuid(), target.id, req.params.id, role||'sales'])
 
       res.status(201).json({ data: { message: `${target.name} added`, user: target } })
-    } catch (err) { next(err) }
+    } catch (err) {
+      if (err._status) return res.status(err._status).json({ error: { message: err.message } })
+      next(err)
+    }
   })
 
   // DELETE /companies/:id/users/:userId — revoke a user's access to a company
   r.delete('/:id/users/:userId', async (req, res, next) => {
     try {
-      const { rows: [access] } = await db.query(
-        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
-        [req.user.id, req.params.id])
-      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+      await requireAdminOfCompany(req.user.id, req.params.id)
 
-      // Prevent removing self from last company
+      // Prevent self-removal from the currently active company (token would remain valid)
+      if (req.params.userId === req.user.id && req.params.id === req.user.company_id)
+        return res.status(400).json({ error: { message: 'Cannot remove yourself from your currently active company. Switch to another company first.' } })
+
+      // Prevent removing self if this is their only company globally
       if (req.params.userId === req.user.id) {
         const { rows: [cnt] } = await db.query(
           `SELECT COUNT(*)::int AS n FROM user_companies WHERE user_id=$1`, [req.user.id])
@@ -826,11 +836,26 @@ module.exports.companiesRouter = (() => {
           return res.status(400).json({ error: { message: 'Cannot remove yourself from your only company' } })
       }
 
+      // Prevent orphaning: ensure the company keeps at least one admin
+      const { rows: [targetUc] } = await db.query(
+        `SELECT role FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        [req.params.userId, req.params.id])
+      if (targetUc?.role === 'admin') {
+        const { rows: [adminCnt] } = await db.query(
+          `SELECT COUNT(*)::int AS n FROM user_companies WHERE company_id=$1 AND role='admin'`,
+          [req.params.id])
+        if (adminCnt.n <= 1)
+          return res.status(400).json({ error: { message: 'Cannot remove the last admin of a company. Assign another admin first.' } })
+      }
+
       await db.query(
         `DELETE FROM user_companies WHERE user_id=$1 AND company_id=$2`,
         [req.params.userId, req.params.id])
       res.json({ message: 'User removed from company' })
-    } catch (err) { next(err) }
+    } catch (err) {
+      if (err._status) return res.status(err._status).json({ error: { message: err.message } })
+      next(err)
+    }
   })
 
   return r

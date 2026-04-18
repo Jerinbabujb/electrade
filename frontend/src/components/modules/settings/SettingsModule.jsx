@@ -449,7 +449,9 @@ export default function SettingsModule() {
     <div style={{display:'flex',flexDirection:'column',flex:1,overflow:'hidden'}}>
       <div className="module-title">Settings</div>
       <div className="tab-bar">
-        {[['company','Company'],['tax','VAT & Tax'],['users','Users & Access'],['companies','Companies'],['invoice','Invoice Templates'],
+        {[['company','Company'],['tax','VAT & Tax'],['users','Users & Access'],
+          ...(user?.role==='admin' ? [['companies','Companies']] : []),
+          ['invoice','Invoice Templates'],
           ...(user?.role==='admin' ? [['import','Import Data'],['sinvoice','Simple Invoice'],['backup','Backups'],['demo','Demo & Reset']] : [])
         ].map(([id,label])=>(
           <div key={id} className={`tab ${tab===id?'active':''}`} onClick={()=>setTab(id)}
