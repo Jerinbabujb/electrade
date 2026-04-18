@@ -718,5 +718,120 @@ module.exports.companiesRouter = (() => {
     } catch (err) { next(err) }
   })
 
+  // GET /companies/all — all companies this user has access to
+  r.get('/all', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT c.id, c.name, c.name_ar, c.cr_number, c.vat_number, c.email, c.tel,
+                c.default_vat_rate, c.default_currency, c.logo_url, c.created_at,
+                uc.role, uc.is_default,
+                (SELECT COUNT(*)::int FROM user_companies WHERE company_id = c.id) AS user_count
+         FROM user_companies uc
+         JOIN companies c ON c.id = uc.company_id
+         WHERE uc.user_id = $1
+         ORDER BY uc.is_default DESC, c.name`,
+        [req.user.id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  // POST /companies — create a new company (creator is auto-added as admin)
+  r.post('/', async (req, res, next) => {
+    try {
+      const { name, name_ar, cr_number, vat_number, address, tel, email,
+              default_vat_rate, default_currency } = req.body
+      if (!name || !cr_number || !vat_number)
+        return res.status(400).json({ error: { message: 'Name, CR number and VAT number are required' } })
+
+      const co = await db.withTransaction(async (client) => {
+        const { rows: [created] } = await client.query(
+          `INSERT INTO companies
+             (id, name, name_ar, cr_number, vat_number, address, tel, email,
+              default_vat_rate, default_currency)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          [uuid(), name, name_ar||null, cr_number, vat_number, address||null,
+           tel||null, email||null, default_vat_rate||10, default_currency||'BHD'])
+        await client.query(
+          `INSERT INTO user_companies (id, user_id, company_id, role, is_default)
+           VALUES ($1,$2,$3,'admin',false)`,
+          [uuid(), req.user.id, created.id])
+        return created
+      })
+
+      res.status(201).json({ data: co })
+    } catch (err) {
+      if (err.code === '23505') return res.status(409).json({ error: { message: 'A company with that CR number already exists' } })
+      next(err)
+    }
+  })
+
+  // GET /companies/:id/users — list users with access to a specific company
+  r.get('/:id/users', async (req, res, next) => {
+    try {
+      const { rows: [access] } = await db.query(
+        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        [req.user.id, req.params.id])
+      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+
+      const { rows } = await db.query(
+        `SELECT u.id, u.name, u.email, uc.role, u.is_active, uc.is_default, u.last_login
+         FROM user_companies uc
+         JOIN users u ON u.id = uc.user_id
+         WHERE uc.company_id = $1
+         ORDER BY u.name`,
+        [req.params.id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  // POST /companies/:id/users — grant an existing user access by email
+  r.post('/:id/users', async (req, res, next) => {
+    try {
+      const { email, role } = req.body
+      if (!email) return res.status(400).json({ error: { message: 'Email required' } })
+
+      const { rows: [access] } = await db.query(
+        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        [req.user.id, req.params.id])
+      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+
+      const { rows: [target] } = await db.query(
+        `SELECT id, name, email FROM users WHERE email=$1 AND is_active=true`,
+        [email.toLowerCase()])
+      if (!target) return res.status(404).json({ error: { message: 'No active user found with that email' } })
+
+      await db.query(
+        `INSERT INTO user_companies (id, user_id, company_id, role, is_default)
+         VALUES ($1,$2,$3,$4,false)
+         ON CONFLICT (user_id, company_id) DO UPDATE SET role=$4`,
+        [uuid(), target.id, req.params.id, role||'sales'])
+
+      res.status(201).json({ data: { message: `${target.name} added`, user: target } })
+    } catch (err) { next(err) }
+  })
+
+  // DELETE /companies/:id/users/:userId — revoke a user's access to a company
+  r.delete('/:id/users/:userId', async (req, res, next) => {
+    try {
+      const { rows: [access] } = await db.query(
+        `SELECT 1 FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        [req.user.id, req.params.id])
+      if (!access) return res.status(403).json({ error: { message: 'No access to this company' } })
+
+      // Prevent removing self from last company
+      if (req.params.userId === req.user.id) {
+        const { rows: [cnt] } = await db.query(
+          `SELECT COUNT(*)::int AS n FROM user_companies WHERE user_id=$1`, [req.user.id])
+        if (cnt.n <= 1)
+          return res.status(400).json({ error: { message: 'Cannot remove yourself from your only company' } })
+      }
+
+      await db.query(
+        `DELETE FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        [req.params.userId, req.params.id])
+      res.json({ message: 'User removed from company' })
+    } catch (err) { next(err) }
+  })
+
   return r
 })()

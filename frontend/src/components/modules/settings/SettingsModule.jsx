@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { authApi } from '../../../services/api'
+import { authApi, companyApi } from '../../../services/api'
 import { useAuthStore } from '../../../store'
 import toast from 'react-hot-toast'
 import api from '../../../services/api'
@@ -204,6 +204,192 @@ function EditUserModal({ u, onClose }) {
   )
 }
 
+// ── Companies Tab ──────────────────────────────────────────
+function CompanyUsersPanel({ company, currentUserId }) {
+  const qc = useQueryClient()
+  const [addForm, setAddForm] = useState({ email: '', role: 'sales' })
+  const key = ['company-users', company.id]
+
+  const { data: usersData, isFetching } = useQuery({
+    queryKey: key,
+    queryFn: () => companyApi.listUsers(company.id).then(r => r.data.data),
+  })
+
+  const addMut = useMutation({
+    mutationFn: () => companyApi.addUser(company.id, addForm),
+    onSuccess: () => {
+      toast.success('User added')
+      qc.invalidateQueries(key)
+      setAddForm({ email: '', role: 'sales' })
+    },
+  })
+
+  const removeMut = useMutation({
+    mutationFn: (userId) => companyApi.removeUser(company.id, userId),
+    onSuccess: () => { toast.success('User removed'); qc.invalidateQueries(key) },
+  })
+
+  return (
+    <div style={{ borderTop: '1px solid #e8e8e8', padding: '10px 14px', background: '#fafafa' }}>
+      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: '#444' }}>Users with access</div>
+      {isFetching
+        ? <div style={{ fontSize: 12, color: '#888' }}>Loading...</div>
+        : (
+          <table className="data-table" style={{ fontSize: 12, marginBottom: 10 }}>
+            <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              {(usersData || []).map(u => (
+                <tr key={u.id}>
+                  <td style={{ fontWeight: 600 }}>{u.name}{u.id === currentUserId ? ' (you)' : ''}</td>
+                  <td>{u.email}</td>
+                  <td><span style={{ padding: '1px 7px', background: 'var(--blue-light)', borderRadius: 10, fontSize: 11, color: 'var(--blue)' }}>{u.role}</span></td>
+                  <td><span className={`badge ${u.is_active ? 'badge-paid' : 'badge-cancelled'}`}>{u.is_active ? 'Active' : 'Inactive'}</span></td>
+                  <td>
+                    <button className="btn danger" style={{ fontSize: 11, padding: '1px 7px' }}
+                      disabled={removeMut.isPending}
+                      onClick={() => removeMut.mutate(u.id)}>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )
+      }
+      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, color: '#444' }}>Grant access to existing user</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+        <div className="field" style={{ flex: 2, marginBottom: 0 }}>
+          <label style={{ fontSize: 11 }}>Email address</label>
+          <input value={addForm.email} onChange={e => setAddForm(f => ({ ...f, email: e.target.value }))}
+            placeholder="user@example.com" style={{ fontSize: 12 }} />
+        </div>
+        <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+          <label style={{ fontSize: 11 }}>Role</label>
+          <select value={addForm.role} onChange={e => setAddForm(f => ({ ...f, role: e.target.value }))} style={{ fontSize: 12 }}>
+            <option value="admin">Admin</option>
+            <option value="sales">Sales</option>
+            <option value="storekeeper">Storekeeper</option>
+            <option value="accountant">Accountant</option>
+          </select>
+        </div>
+        <button className="btn primary" style={{ fontSize: 12, marginBottom: 1 }}
+          disabled={addMut.isPending || !addForm.email}
+          onClick={() => addMut.mutate()}>
+          {addMut.isPending ? '⏳' : '＋ Add'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function CompaniesTab({ currentUserId }) {
+  const qc = useQueryClient()
+  const [expanded, setExpanded] = useState(null)
+  const [showNew, setShowNew] = useState(false)
+  const [newCo, setNewCo] = useState({ name: '', cr_number: '', vat_number: '', default_vat_rate: 10, default_currency: 'BHD' })
+  const NC = (k, v) => setNewCo(f => ({ ...f, [k]: v }))
+
+  const { data: companies } = useQuery({
+    queryKey: ['all-companies'],
+    queryFn: () => companyApi.listAll().then(r => r.data.data),
+  })
+
+  const createMut = useMutation({
+    mutationFn: () => companyApi.create(newCo),
+    onSuccess: () => {
+      toast.success('Company created')
+      qc.invalidateQueries(['all-companies'])
+      setNewCo({ name: '', cr_number: '', vat_number: '', default_vat_rate: 10, default_currency: 'BHD' })
+      setShowNew(false)
+    },
+  })
+
+  return (
+    <div style={{ maxWidth: 720 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#333' }}>Companies you have access to</div>
+        <button className="btn primary" onClick={() => setShowNew(s => !s)}>
+          {showNew ? '✕ Cancel' : '＋ New Company'}
+        </button>
+      </div>
+
+      {showNew && (
+        <div style={{ border: '1px solid #b0c8f0', borderRadius: 4, padding: 14, marginBottom: 14, background: 'var(--blue-light)' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: 'var(--blue)' }}>Create New Company</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
+            <div className="field" style={{ gridColumn: 'span 2' }}>
+              <label>Company Name *</label>
+              <input value={newCo.name} onChange={e => NC('name', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>CR Number *</label>
+              <input value={newCo.cr_number} onChange={e => NC('cr_number', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>VAT Number *</label>
+              <input value={newCo.vat_number} onChange={e => NC('vat_number', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Default VAT %</label>
+              <input type="number" value={newCo.default_vat_rate} onChange={e => NC('default_vat_rate', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Currency</label>
+              <select value={newCo.default_currency} onChange={e => NC('default_currency', e.target.value)}>
+                <option>BHD</option><option>USD</option><option>SAR</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: '#555', marginBottom: 10 }}>
+            You will be automatically added as admin of the new company. Switch to it from the company selector in the top bar.
+          </div>
+          <button className="btn primary" onClick={() => createMut.mutate()}
+            disabled={createMut.isPending || !newCo.name || !newCo.cr_number || !newCo.vat_number}>
+            {createMut.isPending ? '⏳ Creating...' : '✔ Create Company'}
+          </button>
+        </div>
+      )}
+
+      <div style={{ border: '1px solid #e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+        {(companies || []).length === 0 && (
+          <div style={{ padding: 16, color: '#888', fontSize: 12, textAlign: 'center' }}>No companies found</div>
+        )}
+        {(companies || []).map((co, i) => {
+          const isOpen = expanded === co.id
+          return (
+            <div key={co.id} style={{ borderTop: i > 0 ? '1px solid #e0e0e0' : 'none' }}>
+              <div
+                onClick={() => setExpanded(isOpen ? null : co.id)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px',
+                  cursor: 'pointer', background: isOpen ? 'var(--blue-light)' : '#fff',
+                  userSelect: 'none',
+                }}
+              >
+                <span style={{ fontSize: 13, color: '#aaa', width: 14 }}>{isOpen ? '▼' : '▶'}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: '#222' }}>
+                    {co.name}
+                    {co.is_default && <span style={{ marginLeft: 8, fontSize: 10, background: 'var(--blue)', color: '#fff', borderRadius: 10, padding: '1px 7px' }}>default</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#888', marginTop: 2 }}>CR: {co.cr_number} · VAT: {co.vat_number} · {co.user_count} user{co.user_count !== 1 ? 's' : ''}</div>
+                </div>
+                <span style={{ fontSize: 11, padding: '2px 8px', background: '#f0f0f0', borderRadius: 10, color: '#555' }}>{co.role}</span>
+              </div>
+              {isOpen && <CompanyUsersPanel company={co} currentUserId={currentUserId} />}
+            </div>
+          )
+        })}
+      </div>
+
+      <div style={{ marginTop: 12, fontSize: 11, color: '#888' }}>
+        To create a user and add them to a company: first create them in the <strong>Users &amp; Access</strong> tab, then grant access here.
+      </div>
+    </div>
+  )
+}
+
 export default function SettingsModule() {
   const { user } = useAuthStore()
   const qc = useQueryClient()
@@ -263,7 +449,7 @@ export default function SettingsModule() {
     <div style={{display:'flex',flexDirection:'column',flex:1,overflow:'hidden'}}>
       <div className="module-title">Settings</div>
       <div className="tab-bar">
-        {[['company','Company'],['tax','VAT & Tax'],['users','Users & Access'],['invoice','Invoice Templates'],
+        {[['company','Company'],['tax','VAT & Tax'],['users','Users & Access'],['companies','Companies'],['invoice','Invoice Templates'],
           ...(user?.role==='admin' ? [['import','Import Data'],['sinvoice','Simple Invoice'],['backup','Backups'],['demo','Demo & Reset']] : [])
         ].map(([id,label])=>(
           <div key={id} className={`tab ${tab===id?'active':''}`} onClick={()=>setTab(id)}
@@ -399,6 +585,8 @@ export default function SettingsModule() {
             </div>
           </div>
         )}
+
+        {tab==='companies' && <CompaniesTab currentUserId={user?.id} />}
 
         {tab==='import'   && user?.role==='admin' && <ImportTab />}
         {tab==='sinvoice' && user?.role==='admin' && <SimpleInvoiceImportTab />}

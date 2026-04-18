@@ -255,10 +255,16 @@ export const convertApi = {
 
 // ── Company ────────────────────────────────────
 export const companyApi = {
-  get:        ()      => api.get('/companies'),
-  save:       (data)  => api.put('/companies', data),
-  uploadLogo: (logo)  => api.post('/companies/logo', { logo }),
-  removeLogo: ()      => api.delete('/companies/logo'),
+  get:          ()           => api.get('/companies'),
+  save:         (data)       => api.put('/companies', data),
+  uploadLogo:   (logo)       => api.post('/companies/logo', { logo }),
+  removeLogo:   ()           => api.delete('/companies/logo'),
+  // Multi-company management
+  listAll:      ()           => api.get('/companies/all'),
+  create:       (data)       => api.post('/companies', data),
+  listUsers:    (id)         => api.get(`/companies/${id}/users`),
+  addUser:      (id, data)   => api.post(`/companies/${id}/users`, data),
+  removeUser:   (id, userId) => api.delete(`/companies/${id}/users/${userId}`),
 }
 
 // ── Contra Accounts ────────────────────────────
