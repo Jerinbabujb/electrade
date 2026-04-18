@@ -1,0 +1,8 @@
+# Lightweight dev image — Vite dev server with HMR (hot module replacement).
+# Source is mounted as a volume from the host, so no rebuild needed on code changes.
+FROM node:20-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm install
+EXPOSE 5173
+CMD ["npx", "vite", "--host", "0.0.0.0"]

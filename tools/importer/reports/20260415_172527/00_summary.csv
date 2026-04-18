@@ -1,0 +1,25 @@
+﻿severity,check,count,action
+HIGH,Zero selling price (price_1 = 0),195,Set correct selling price. Items cannot be invoiced at zero.
+MED,"Zero cost price (cost_price = 0, sell price set)",0,Enter actual cost price. Required for accurate P&L and margin reports.
+HIGH,Negative stock quantity,0,Investigate: likely missing purchase records or opening stock not entered.
+MED,Stock below minimum reorder level,7,Review reorder levels and raise purchase orders.
+LOW,No category assigned,53,Assign a category. Required for stock reports and product filtering.
+HIGH,Duplicate SKU codes,0,Each product must have a unique SKU. Merge duplicates or assign new codes.
+HIGH,Duplicate barcodes,0,Barcode must uniquely identify one product. Remove or correct duplicate barcodes.
+MED,Similar product names (possible duplicates),11379,"Review each pair — merge if same product, rename if different."
+MED,In-stock products with no sales in last 12 months (slow-moving),2714,"Review for write-down, return to supplier, or promotion."
+MED,No telephone AND no email,225,"Add at least one contact method for invoicing, statements, and overdue chasing."
+MED,B2B customers missing VAT registration number,0,Obtain VAT number for tax invoice compliance. Required for VAT audit.
+LOW,B2B customers missing CR (Commercial Registration) number,0,CR number helps with deduplication and formal identification.
+HIGH,Duplicate VAT numbers (likely same company entered twice),16,Same VAT number = same legal entity. Merge the duplicate records.
+HIGH,Duplicate CR numbers (likely same company entered twice),0,Same CR = same legal entity. Merge the duplicate records.
+LOW,Customers with no invoices (never traded),11,Confirm these are real customers. Deactivate if not needed.
+HIGH,Similar customer names (possible duplicates),10,"Verify each pair. If same company: merge, reassign invoices, delete one."
+MED,B2B customers with open AR balance but credit limit = 0,0,Set credit limits to manage exposure and trigger alerts.
+MED,No telephone AND no email,139,Add contact info for purchase orders and payment remittances.
+MED,Missing VAT registration number,15,Required on purchase invoices for input VAT reclaim.
+LOW,Suppliers with no purchase records,14,Confirm these are active suppliers. Deactivate or delete if not needed.
+HIGH,Suppliers with open AP balance but no VAT number,1,High priority — obtain VAT numbers for outstanding AP suppliers before filing.
+HIGH,Duplicate VAT numbers (likely same supplier entered twice),5,Merge duplicate supplier records and reassign all purchases to the retained record.
+HIGH,Similar supplier names (possible duplicates),12,"Verify each pair. If same supplier: merge records, reassign purchases."
+LOW,AP concentration (top 10 suppliers),10,Monitor supplier dependency; diversify if top supplier > 30% of AP.

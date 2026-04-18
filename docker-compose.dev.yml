@@ -1,0 +1,39 @@
+# Development overrides — use this file during active development.
+# Activates automatically when you run `docker compose up` (Docker merges it with docker-compose.yml).
+#
+# What this does:
+#   - Mounts backend/src/ and frontend/src/ as live volumes — no rebuild needed for code changes
+#   - Switches API to NODE_ENV=development so nodemon auto-restarts on file save
+#   - Switches frontend to Vite dev server (hot-module replacement)
+#
+# To run in production mode (no overrides):
+#   docker compose -f docker-compose.yml up
+
+version: '3.9'
+
+services:
+  api:
+    # Override the baked image with a dev-friendly version using nodemon
+    build:
+      context: ./backend
+      target: development        # uses the dev stage in Dockerfile if defined; falls back gracefully
+    environment:
+      NODE_ENV: development
+    volumes:
+      - backups:/app/backups
+      - ./backend/src:/app/src   # live-mount source — file saves restart nodemon instantly
+    command: ["npx", "nodemon", "--watch", "src", "src/server.js"]
+
+  frontend:
+    # Replace the nginx-served build with Vite dev server
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev  # lightweight dev Dockerfile (created below)
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src           # live-mount source — Vite HMR picks up changes instantly
+      - ./frontend/public:/app/public
+    environment:
+      - VITE_API_URL=http://localhost:3001
+    command: ["npx", "vite", "--host", "0.0.0.0"]

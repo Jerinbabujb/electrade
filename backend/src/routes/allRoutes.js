@@ -1,0 +1,722 @@
+const { Router } = require('express')
+const db  = require('../db')
+const { v4: uuid } = require('uuid')
+const { authenticate, authorize } = require('../middleware/auth')
+
+// ── Generic CRUD factory ───────────────────────────────────
+const crud = ({ table, idField = 'id', companyField = 'company_id', listSql, getSql, createFn, updateFn }) => {
+  const r = Router()
+  r.use(authenticate)
+
+  r.get('/', async (req, res, next) => {
+    try {
+      const sql = listSql || `SELECT * FROM ${table} WHERE ${companyField} = $1 ORDER BY created_at DESC`
+      const { rows } = await db.query(sql, [req.user.company_id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id', async (req, res, next) => {
+    try {
+      const sql = getSql || `SELECT * FROM ${table} WHERE id = $1 AND ${companyField} = $2`
+      const { rows: [row] } = await db.query(sql, [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/', authorize('admin', 'sales', 'storekeeper'), async (req, res, next) => {
+    try {
+      const row = await createFn(req, db, uuid)
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/:id', authorize('admin', 'sales', 'storekeeper'), async (req, res, next) => {
+    try {
+      const row = await updateFn(req, db)
+      if (!row) return res.status(404).json({ error: { message: 'Not found or not editable' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.delete('/:id', authorize('admin'), async (req, res, next) => {
+    try {
+      await db.query(`UPDATE ${table} SET is_active = false WHERE id = $1 AND ${companyField} = $2`,
+        [req.params.id, req.user.company_id])
+      res.json({ message: 'Deleted (soft)' })
+    } catch (err) { next(err) }
+  })
+
+  return r
+}
+
+// ── Customers ──────────────────────────────────────────────
+module.exports.customersRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+
+  // GET /customers?q=&role=customer|supplier&category=retail,wholesale,...
+  // role=customer     → is_customer=TRUE  (customers + dual-role entities)
+  // role=supplier     → is_supplier=TRUE  (suppliers + dual-role entities)
+  // category=retail,. → customer_category filter (retail/wholesale/contractor/government)
+  r.get('/', async (req, res, next) => {
+    try {
+      const { q, role, category } = req.query
+      const params = [req.user.company_id]
+      const where  = ['company_id = $1', 'is_active = true']
+      if (q) {
+        params.push(`%${q}%`)
+        where.push(`(name ILIKE $${params.length} OR code ILIKE $${params.length} OR cr_number ILIKE $${params.length} OR vat_number ILIKE $${params.length} OR tel ILIKE $${params.length} OR email ILIKE $${params.length})`)
+      }
+      if (role === 'customer') where.push('is_customer = TRUE')
+      if (role === 'supplier') where.push('is_supplier = TRUE')
+      if (category) {
+        // AR classification filter — independent of role
+        const cats = category.split(',').map(t => t.trim()).filter(Boolean)
+        params.push(cats)
+        where.push(`customer_category = ANY($${params.length}::text[])`)
+      }
+      const { rows } = await db.query(
+        `SELECT * FROM customers WHERE ${where.join(' AND ')} ORDER BY name LIMIT 100`, params)
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id', async (req, res, next) => {
+    try {
+      const { rows: [row] } = await db.query(
+        `SELECT * FROM customers WHERE id = $1 AND company_id = $2`, [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/', authorize('admin', 'sales', 'storekeeper'), async (req, res, next) => {
+    try {
+      let { code, name, type, customer_category, cr_number, vat_number, address, tel, email,
+            credit_limit, payment_terms_days, supplier_payment_terms_days,
+            price_tier, category_id, notes,
+            is_customer, is_supplier } = req.body
+      if (!code || !code.trim()) {
+        const { rows: [cnt] } = await db.query(`SELECT COUNT(*) AS n FROM customers WHERE company_id=$1`, [req.user.company_id])
+        code = 'C' + String(parseInt(cnt.n) + 1).padStart(3, '0')
+      }
+      const resolvedType = type || 'retail'
+      // Derive role flags if not explicitly supplied
+      const isCust = is_customer !== undefined ? !!is_customer : (resolvedType !== 'supplier')
+      const isSupp = is_supplier !== undefined ? !!is_supplier : (resolvedType === 'supplier')
+      // customer_category: explicit value > derived from type > null for pure suppliers
+      const resolvedCategory = customer_category || (isCust ? (resolvedType !== 'supplier' ? resolvedType : 'retail') : null)
+      const { rows: [row] } = await db.query(
+        `INSERT INTO customers (id,company_id,code,name,type,customer_category,cr_number,vat_number,address,tel,email,credit_limit,payment_terms_days,supplier_payment_terms_days,price_tier,category_id,notes,is_customer,is_supplier)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+        [uuid(), req.user.company_id, code, name, resolvedType, resolvedCategory, cr_number, vat_number,
+         address, tel, email, credit_limit||0, payment_terms_days||30,
+         supplier_payment_terms_days||null, price_tier||1, category_id||null, notes,
+         isCust, isSupp])
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/:id', authorize('admin', 'sales', 'storekeeper'), async (req, res, next) => {
+    try {
+      const { name, type, customer_category, cr_number, vat_number, address, tel, email,
+              credit_limit, payment_terms_days, supplier_payment_terms_days,
+              price_tier, notes,
+              linked_supplier_id, is_customer, is_supplier } = req.body
+      // Optional fields: pass undefined to leave unchanged
+      const linkVal = linked_supplier_id === undefined ? undefined : (linked_supplier_id || null)
+      const custVal = is_customer === undefined ? undefined : !!is_customer
+      const suppVal = is_supplier === undefined ? undefined : !!is_supplier
+      const suppTerms = supplier_payment_terms_days === undefined ? undefined
+                      : (supplier_payment_terms_days === null || supplier_payment_terms_days === ''
+                          ? null : parseInt(supplier_payment_terms_days))
+      const catVal = customer_category === undefined ? undefined : (customer_category || null)
+
+      // Build dynamic SET clause for optional fields
+      const extras = []
+      const vals   = [name, type, cr_number, vat_number, address, tel, email,
+                      credit_limit, payment_terms_days, price_tier, notes,
+                      req.params.id, req.user.company_id]
+      if (linkVal    !== undefined) { vals.push(linkVal);    extras.push(`,linked_supplier_id=$${vals.length}`) }
+      if (custVal    !== undefined) { vals.push(custVal);    extras.push(`,is_customer=$${vals.length}`) }
+      if (suppVal    !== undefined) { vals.push(suppVal);    extras.push(`,is_supplier=$${vals.length}`) }
+      if (suppTerms  !== undefined) { vals.push(suppTerms);  extras.push(`,supplier_payment_terms_days=$${vals.length}`) }
+      if (catVal     !== undefined) { vals.push(catVal);     extras.push(`,customer_category=$${vals.length}`) }
+
+      const { rows: [row] } = await db.query(
+        `UPDATE customers SET name=$1,type=$2,cr_number=$3,vat_number=$4,address=$5,tel=$6,email=$7,
+           credit_limit=$8,payment_terms_days=$9,price_tier=$10,notes=$11
+           ${extras.join('')}
+         WHERE id=$12 AND company_id=$13 RETURNING *`,
+        vals
+      )
+      if (!row) return res.status(404).json({ error: { message: 'Not found or not editable' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.delete('/:id', authorize('admin'), async (req, res, next) => {
+    try {
+      await db.query(`UPDATE customers SET is_active = false WHERE id = $1 AND company_id = $2`,
+        [req.params.id, req.user.company_id])
+      res.json({ message: 'Deleted (soft)' })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
+// ── Products ───────────────────────────────────────────────
+module.exports.productsRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+
+  r.get('/', async (req, res, next) => {
+    try {
+      const { q, category_id, low_stock } = req.query
+      let where = ['p.company_id = $1', 'p.is_active = true']
+      const params = [req.user.company_id]
+      if (q)           { params.push(`%${q}%`); where.push(`(p.name ILIKE $${params.length} OR p.sku ILIKE $${params.length} OR p.barcode = $${params.length})`) }
+      if (category_id) { params.push(category_id); where.push(`p.category_id = $${params.length}`) }
+      if (low_stock === 'true') where.push(`p.stock_qty <= p.stock_min`)
+      const { rows } = await db.query(
+        `SELECT p.*, cat.name AS category_name FROM products p
+         LEFT JOIN categories cat ON cat.id = p.category_id
+         WHERE ${where.join(' AND ')} ORDER BY cat.name, p.name`, params)
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  // Barcode / SKU exact lookup — must be BEFORE /:id
+  r.get('/lookup', async (req, res, next) => {
+    try {
+      const { barcode, sku } = req.query
+      if (!barcode && !sku) return res.status(400).json({ error: { message: 'barcode or sku required' } })
+      let where = ['p.company_id = $1', 'p.is_active = true']
+      const params = [req.user.company_id]
+      if (barcode) { params.push(barcode); where.push(`p.barcode = $${params.length}`) }
+      else         { params.push(sku);     where.push(`p.sku = $${params.length}`) }
+      const { rows: [p] } = await db.query(
+        `SELECT p.*, cat.name AS category_name FROM products p
+         LEFT JOIN categories cat ON cat.id = p.category_id
+         WHERE ${where.join(' AND ')} LIMIT 1`, params)
+      if (!p) return res.status(404).json({ error: { message: 'No product found for that barcode / SKU' } })
+      res.json({ data: p })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id', async (req, res, next) => {
+    try {
+      const { rows: [p] } = await db.query(
+        `SELECT p.*, cat.name AS category_name FROM products p
+         LEFT JOIN categories cat ON cat.id = p.category_id
+         WHERE p.id = $1 AND p.company_id = $2`, [req.params.id, req.user.company_id])
+      if (!p) return res.status(404).json({ error: { message: 'Product not found' } })
+      res.json({ data: p })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id/stock-history', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT sm.*, u.name AS created_by_name FROM stock_movements sm
+         LEFT JOIN users u ON u.id = sm.created_by
+         WHERE sm.product_id = $1 ORDER BY sm.created_at DESC LIMIT 100`,
+        [req.params.id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/', authorize('admin','sales','storekeeper'), async (req, res, next) => {
+    try {
+      const f = req.body
+      const { rows: [p] } = await db.query(
+        `INSERT INTO products (id,company_id,sku,barcode,name,description,category_id,brand,country_of_origin,
+           unit,box_qty,voltage_rating,ampere_rating,wattage,cost_price,price_1,price_2,price_3,price_4,
+           vat_rate,stock_min,is_stock_tracked,is_sales_item,is_purchase_item)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
+        [uuid(),req.user.company_id,f.sku,f.barcode||null,f.name,f.description||null,f.category_id||null,
+         f.brand||null,f.country_of_origin||null,f.unit||'pcs',f.box_qty||1,
+         f.voltage_rating||null,f.ampere_rating||null,f.wattage||null,
+         f.cost_price||0,f.price_1||0,f.price_2||0,f.price_3||0,f.price_4||0,
+         f.vat_rate||10,f.stock_min||0,f.is_stock_tracked!==false,f.is_sales_item!==false,f.is_purchase_item!==false])
+      res.status(201).json({ data: p })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/:id', authorize('admin','sales','storekeeper'), async (req, res, next) => {
+    try {
+      const f = req.body
+      const { rows: [p] } = await db.query(
+        `UPDATE products SET sku=$1,barcode=$2,name=$3,description=$4,category_id=$5,brand=$6,
+           country_of_origin=$7,unit=$8,box_qty=$9,voltage_rating=$10,ampere_rating=$11,wattage=$12,
+           cost_price=$13,price_1=$14,price_2=$15,price_3=$16,price_4=$17,vat_rate=$18,
+           stock_min=$19,updated_at=now()
+         WHERE id=$20 AND company_id=$21 RETURNING *`,
+        [f.sku,f.barcode||null,f.name,f.description||null,f.category_id||null,f.brand||null,
+         f.country_of_origin||null,f.unit||'pcs',f.box_qty||1,
+         f.voltage_rating||null,f.ampere_rating||null,f.wattage||null,
+         f.cost_price||0,f.price_1||0,f.price_2||0,f.price_3||0,f.price_4||0,
+         f.vat_rate||10,f.stock_min||0,req.params.id,req.user.company_id])
+      res.json({ data: p })
+    } catch (err) { next(err) }
+  })
+
+  // Manual stock adjustment (single product, delta qty)
+  r.post('/:id/adjust', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { qty, notes } = req.body
+      await db.query(
+        `INSERT INTO stock_movements (id,company_id,product_id,movement_type,qty,ref_type,notes,created_by)
+         VALUES ($1,$2,$3,'adjustment',$4,'manual',$5,$6)`,
+        [uuid(),req.user.company_id,req.params.id,qty,notes||'Manual adjustment',req.user.id])
+      res.json({ message: `Stock adjusted by ${qty}` })
+    } catch (err) { next(err) }
+  })
+
+  // Bulk physical stock count — sets actual qty for each product, records variance
+  r.post('/stock-count', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { adjustments, count_notes } = req.body
+      if (!Array.isArray(adjustments) || !adjustments.length)
+        return res.status(400).json({ error: { message: 'No adjustments provided' } })
+
+      let applied = 0, skipped = 0
+      await db.withTransaction(async (client) => {
+        for (const adj of adjustments) {
+          const { product_id, physical_qty } = adj
+          const pq = parseFloat(physical_qty)
+          if (isNaN(pq)) { skipped++; continue }
+
+          const { rows: [prod] } = await client.query(
+            `SELECT stock_qty FROM products WHERE id=$1 AND company_id=$2`,
+            [product_id, req.user.company_id])
+          if (!prod) { skipped++; continue }
+
+          const variance = pq - parseFloat(prod.stock_qty)
+          if (Math.abs(variance) < 0.001) { skipped++; continue }
+
+          await client.query(
+            `INSERT INTO stock_movements (id,company_id,product_id,movement_type,qty,ref_type,notes,created_by)
+             VALUES ($1,$2,$3,'adjustment',$4,'manual',$5,$6)`,
+            [uuid(), req.user.company_id, product_id,
+             variance,
+             count_notes || 'Physical stock count',
+             req.user.id])
+          applied++
+        }
+      })
+      res.json({ message: `Stock count applied: ${applied} products adjusted, ${skipped} unchanged.`, applied, skipped })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
+// ── Categories ─────────────────────────────────────────────
+module.exports.categoriesRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+  r.get('/', async (req, res, next) => {
+    try {
+      const { type } = req.query
+      let where = ['company_id = $1']
+      const params = [req.user.company_id]
+      if (type) { params.push(type); where.push(`type = $${params.length}`) }
+      const { rows } = await db.query(`SELECT * FROM categories WHERE ${where.join(' AND ')} ORDER BY sort_order, name`, params)
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+  r.post('/', authorize('admin'), async (req, res, next) => {
+    try {
+      const { name, type, parent_id } = req.body
+      const { rows: [row] } = await db.query(
+        `INSERT INTO categories (id,company_id,name,type,parent_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [uuid(), req.user.company_id, name, type, parent_id||null])
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+  r.delete('/:id', authorize('admin'), async (req, res, next) => {
+    try {
+      await db.query(`DELETE FROM categories WHERE id=$1 AND company_id=$2`, [req.params.id, req.user.company_id])
+      res.json({ message: 'Deleted' })
+    } catch (err) { next(err) }
+  })
+  return r
+})()
+
+// ── Purchases ──────────────────────────────────────────────
+module.exports.purchasesRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+
+  r.get('/', async (req, res, next) => {
+    try {
+      const { q, status, supplier_id, from, to, limit: lim, offset: off } = req.query
+      const limit  = Math.min(parseInt(lim  || 100), 500)
+      const offset = Math.max(parseInt(off  || 0),   0)
+      const params = [req.user.company_id]
+      const where  = ['pur.company_id = $1']
+
+      if (status)      { params.push(status);      where.push(`pur.payment_status = $${params.length}`) }
+      if (supplier_id) { params.push(supplier_id); where.push(`pur.supplier_id = $${params.length}`) }
+      if (from)        { params.push(from);        where.push(`pur.purchase_date >= $${params.length}`) }
+      if (to)          { params.push(to);          where.push(`pur.purchase_date <= $${params.length}`) }
+      if (q)           { params.push(`%${q}%`);    where.push(`(pur.purchase_no ILIKE $${params.length} OR c.name ILIKE $${params.length} OR pur.supplier_invoice_no ILIKE $${params.length})`) }
+
+      const whereStr = where.join(' AND ')
+      const [{ rows }, { rows: [countRow] }] = await Promise.all([
+        db.query(
+          `SELECT pur.*, c.name AS supplier_name FROM purchases pur
+           JOIN customers c ON c.id = pur.supplier_id
+           WHERE ${whereStr}
+           ORDER BY pur.purchase_date DESC, pur.purchase_no DESC
+           LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+          [...params, limit, offset]),
+        db.query(
+          `SELECT COUNT(*)::int AS total FROM purchases pur
+           JOIN customers c ON c.id = pur.supplier_id
+           WHERE ${whereStr}`,
+          params),
+      ])
+      res.json({ data: rows, total: countRow.total })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id', async (req, res, next) => {
+    try {
+      const { rows: [pur] } = await db.query(
+        `SELECT pur.*, c.name AS supplier_name FROM purchases pur
+         JOIN customers c ON c.id = pur.supplier_id
+         WHERE pur.id = $1 AND pur.company_id = $2`, [req.params.id, req.user.company_id])
+      if (!pur) return res.status(404).json({ error: { message: 'Not found' } })
+      const { rows: items } = await db.query(
+        `SELECT * FROM purchase_items WHERE purchase_id = $1 ORDER BY line_no`, [req.params.id])
+      res.json({ data: { ...pur, items } })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { supplier_id, supplier_invoice_no, purchase_date, due_date, items = [], notes } = req.body
+
+      const result = await db.withTransaction(async (client) => {
+        const { rows: [co] } = await client.query(
+          `UPDATE companies SET next_pur_seq = next_pur_seq + 1
+           WHERE id = $1 RETURNING po_prefix, next_pur_seq - 1 AS seq`, [req.user.company_id])
+        const purchase_no = `${co.po_prefix}-${new Date().getFullYear()}-${String(co.seq).padStart(4,'0')}`
+
+        const subtotal   = items.reduce((s, i) => s + i.qty * i.unit_price, 0)
+        const total_vat  = items.reduce((s, i) => s + i.qty * i.unit_price * (i.vat_rate||10) / 100, 0)
+        const grand_total = subtotal + total_vat
+
+        // If due_date not provided, auto-calculate from supplier's payment terms
+        let resolvedDueDate = due_date || null
+        if (!resolvedDueDate && supplier_id) {
+          const { rows: [sup] } = await client.query(
+            `SELECT COALESCE(supplier_payment_terms_days, payment_terms_days, 30) AS terms
+             FROM customers WHERE id = $1`, [supplier_id])
+          if (sup) {
+            const base = new Date(purchase_date || new Date())
+            base.setDate(base.getDate() + sup.terms)
+            resolvedDueDate = base.toISOString().split('T')[0]
+          }
+        }
+
+        const { rows: [pur] } = await client.query(
+          `INSERT INTO purchases (id,company_id,purchase_no,supplier_id,supplier_invoice_no,purchase_date,due_date,subtotal,total_vat,grand_total,notes,created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          [uuid(),req.user.company_id,purchase_no,supplier_id,supplier_invoice_no||null,
+           purchase_date||new Date(),resolvedDueDate,subtotal.toFixed(3),total_vat.toFixed(3),grand_total.toFixed(3),notes,req.user.id])
+
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i]
+          await client.query(
+            `INSERT INTO purchase_items (id,purchase_id,product_id,line_no,part_no,description,qty,unit,unit_price,vat_rate)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+            [uuid(),pur.id,it.product_id||null,i+1,it.part_no||null,it.description,it.qty,it.unit||'pcs',it.unit_price,it.vat_rate||10])
+        }
+        return pur
+      })
+
+      res.status(201).json({ data: result, message: `${result.purchase_no} created — stock updated` })
+    } catch (err) { next(err) }
+  })
+
+  // Record payment against purchase
+  r.post('/:id/payments', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { amount, method, payment_date, reference_no, reference, notes } = req.body
+      const ref = reference_no || reference || null
+      await db.withTransaction(async (client) => {
+        const { rows: [pur] } = await client.query(
+          `SELECT * FROM purchases WHERE id=$1 AND company_id=$2`, [req.params.id, req.user.company_id])
+        if (!pur) throw Object.assign(new Error('Purchase not found'), { status: 404 })
+        await client.query(
+          `INSERT INTO payments (id,company_id,reference_type,reference_id,payment_date,amount,method,reference_no,notes,created_by)
+           VALUES ($1,$2,'purchase',$3,$4,$5,$6,$7,$8,$9)`,
+          [uuid(),req.user.company_id,req.params.id,payment_date||new Date(),
+           amount,method||'bank_transfer',ref,notes||null,req.user.id])
+        // update amount_paid + status
+        await client.query(
+          `UPDATE purchases SET
+             amount_paid = amount_paid + $1,
+             payment_status = CASE
+               WHEN amount_paid + $1 >= grand_total THEN 'paid'
+               WHEN amount_paid + $1 > 0 THEN 'partial'
+               ELSE payment_status END,
+             updated_at = now()
+           WHERE id = $2`, [amount, req.params.id])
+      })
+      res.status(201).json({ message: 'Payment recorded' })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/:id/payments', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM payments WHERE reference_id=$1 ORDER BY payment_date DESC`, [req.params.id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  // Delete purchase (only unpaid)
+  r.delete('/:id', authorize('admin'), async (req, res, next) => {
+    try {
+      const { rows: [pur] } = await db.query(
+        `SELECT * FROM purchases WHERE id=$1 AND company_id=$2`, [req.params.id, req.user.company_id])
+      if (!pur) return res.status(404).json({ error: { message: 'Not found' } })
+      if (pur.payment_status === 'paid') return res.status(400).json({ error: { message: 'Cannot delete a fully paid purchase' } })
+      await db.query(`DELETE FROM purchases WHERE id=$1`, [req.params.id])
+      res.json({ message: `${pur.purchase_no} deleted` })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
+// ── Expenses ───────────────────────────────────────────────
+module.exports.expensesRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+
+  r.get('/', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT e.*, cat.name AS category_name FROM expenses e
+         LEFT JOIN categories cat ON cat.id = e.category_id
+         WHERE e.company_id = $1 ORDER BY e.expense_date DESC`, [req.user.company_id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { category_id, supplier_id, expense_date, description, net_amount, vat_amount, notes } = req.body
+      const { rows: [co] } = await db.query(
+        `SELECT COUNT(*) AS cnt FROM expenses WHERE company_id = $1`, [req.user.company_id])
+      const expense_no = `EXP-${new Date().getFullYear()}-${String(parseInt(co.cnt)+1).padStart(4,'0')}`
+      const total_amount = parseFloat(net_amount) + parseFloat(vat_amount||0)
+      const { rows: [row] } = await db.query(
+        `INSERT INTO expenses (id,company_id,expense_no,category_id,supplier_id,expense_date,description,net_amount,vat_amount,total_amount,notes,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [uuid(),req.user.company_id,expense_no,category_id||null,supplier_id||null,
+         expense_date||new Date(),description,net_amount,vat_amount||0,total_amount.toFixed(3),notes,req.user.id])
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/:id', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { category_id, expense_date, description, net_amount, vat_amount, notes } = req.body
+      const total_amount = parseFloat(net_amount) + parseFloat(vat_amount||0)
+      const { rows: [row] } = await db.query(
+        `UPDATE expenses SET category_id=$1, expense_date=$2, description=$3,
+           net_amount=$4, vat_amount=$5, total_amount=$6, notes=$7, updated_at=now()
+         WHERE id=$8 AND company_id=$9 RETURNING *`,
+        [category_id||null, expense_date, description, net_amount, vat_amount||0,
+         total_amount.toFixed(3), notes||null, req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.delete('/:id', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { rows: [row] } = await db.query(
+        `DELETE FROM expenses WHERE id=$1 AND company_id=$2 RETURNING expense_no`, [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ message: `${row.expense_no} deleted` })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
+// ── Bank reconciliation ────────────────────────────────────
+module.exports.bankRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+  r.use(authorize('admin','accountant'))
+
+  r.get('/accounts', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(`SELECT * FROM bank_accounts WHERE company_id=$1 AND is_active=true`, [req.user.company_id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/accounts/:id/transactions', async (req, res, next) => {
+    try {
+      const { from, to } = req.query
+      // $1=account_id, $2=company_id — join through bank_accounts to enforce tenant scope
+      let where = ['bt.bank_account_id = $1', 'ba.company_id = $2']
+      const params = [req.params.id, req.user.company_id]
+      if (from) { params.push(from); where.push(`bt.transaction_date >= $${params.length}`) }
+      if (to)   { params.push(to);   where.push(`bt.transaction_date <= $${params.length}`) }
+      const { rows } = await db.query(
+        `SELECT bt.* FROM bank_transactions bt
+         JOIN bank_accounts ba ON ba.id = bt.bank_account_id
+         WHERE ${where.join(' AND ')} ORDER BY bt.transaction_date DESC`, params)
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/accounts/:id/auto-match', async (req, res, next) => {
+    try {
+      // Verify account belongs to this company before touching its transactions
+      const { rows: [acct] } = await db.query(
+        `SELECT id FROM bank_accounts WHERE id=$1 AND company_id=$2`, [req.params.id, req.user.company_id])
+      if (!acct) return res.status(404).json({ error: { message: 'Account not found' } })
+
+      // Auto-match: find unmatched transactions and try to match by amount + reference
+      const { rows: unmatched } = await db.query(
+        `SELECT * FROM bank_transactions WHERE bank_account_id=$1 AND match_status='unmatched'`, [req.params.id])
+      let matched = 0
+      for (const tx of unmatched) {
+        const amount = tx.debit > 0 ? tx.debit : tx.credit
+        const { rows: [inv] } = await db.query(
+          `SELECT id, invoice_no FROM invoices
+           WHERE company_id=$1 AND ABS(grand_total - $2) < 0.01 AND payment_status != 'paid'
+           LIMIT 1`, [req.user.company_id, amount])
+        if (inv) {
+          await db.query(
+            `UPDATE bank_transactions SET match_status='matched', ref_type='invoice', ref_id=$1, ref_no=$2
+             WHERE id=$3`, [inv.id, inv.invoice_no, tx.id])
+          matched++
+        }
+      }
+      res.json({ message: `Auto-matched ${matched} of ${unmatched.length} transactions` })
+    } catch (err) { next(err) }
+  })
+
+  // Import parsed transactions from frontend CSV parse
+  r.post('/accounts/:id/import', async (req, res, next) => {
+    try {
+      const { rows: [acct] } = await db.query(
+        `SELECT * FROM bank_accounts WHERE id=$1 AND company_id=$2`, [req.params.id, req.user.company_id])
+      if (!acct) return res.status(404).json({ error: { message: 'Account not found' } })
+
+      const { transactions = [] } = req.body
+      if (!transactions.length) return res.status(400).json({ error: { message: 'No transactions provided' } })
+
+      let inserted = 0, skipped = 0
+      for (const tx of transactions) {
+        // Skip duplicates: same date + description + debit + credit
+        const { rows: [exists] } = await db.query(
+          `SELECT id FROM bank_transactions
+           WHERE bank_account_id=$1 AND transaction_date=$2
+             AND description=$3 AND debit=$4 AND credit=$5`,
+          [req.params.id, tx.date, tx.description, tx.debit||0, tx.credit||0])
+        if (exists) { skipped++; continue }
+        await db.query(
+          `INSERT INTO bank_transactions (bank_account_id, transaction_date, description, debit, credit, balance)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [req.params.id, tx.date, tx.description, tx.debit||0, tx.credit||0, tx.balance||null])
+        inserted++
+      }
+      res.json({ message: `Imported ${inserted} transactions (${skipped} duplicates skipped)`, inserted, skipped })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/transactions/:id/match', async (req, res, next) => {
+    try {
+      const { ref_type, ref_id, ref_no } = req.body
+      const { rows: [tx] } = await db.query(
+        `SELECT bt.id FROM bank_transactions bt
+         JOIN bank_accounts ba ON ba.id = bt.bank_account_id AND ba.company_id = $1
+         WHERE bt.id = $2`,
+        [req.user.company_id, req.params.id])
+      if (!tx) return res.status(404).json({ error: { message: 'Transaction not found' } })
+      await db.query(
+        `UPDATE bank_transactions SET match_status='manually_matched', ref_type=$1, ref_id=$2, ref_no=$3 WHERE id=$4`,
+        [ref_type, ref_id, ref_no, req.params.id])
+      res.json({ message: 'Transaction manually matched' })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
+// ── Companies ──────────────────────────────────────────────
+module.exports.companiesRouter = (() => {
+  const r = Router()
+  r.use(authenticate, authorize('admin'))
+
+  r.get('/', async (req, res, next) => {
+    try {
+      const { rows: [co] } = await db.query(`SELECT * FROM companies WHERE id=$1`, [req.user.company_id])
+      res.json({ data: co })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/', async (req, res, next) => {
+    try {
+      const f = req.body
+      const { rows: [co] } = await db.query(
+        `UPDATE companies SET name=$1,name_ar=$2,address=$3,tel=$4,email=$5,
+           vat_number=$6,cr_number=$7,
+           default_vat_rate=$8,bank_name=$9,bank_acct_name=$10,bank_iban=$11,bank_swift=$12,
+           theme_color=$13,
+           invoice_prefix=COALESCE(NULLIF($14,''),'INV'),
+           dn_prefix=COALESCE(NULLIF($15,''),'DN'),
+           po_prefix=COALESCE(NULLIF($16,''),'PUR')
+         WHERE id=$17 RETURNING *`,
+        [f.name,f.name_ar||null,f.address||null,f.tel||null,f.email||null,
+         f.vat_number||null,f.cr_number||null,
+         f.default_vat_rate||10,f.bank_name||null,f.bank_acct_name||null,f.bank_iban||null,f.bank_swift||null,
+         f.theme_color||'#1a5fa8',
+         f.invoice_prefix||'INV', f.dn_prefix||'DN', f.po_prefix||'PUR',
+         req.user.company_id])
+      res.json({ data: co })
+    } catch (err) { next(err) }
+  })
+
+  // POST /companies/logo — accepts { logo: 'data:image/png;base64,...' }
+  r.post('/logo', async (req, res, next) => {
+    try {
+      const { logo } = req.body
+      if (!logo || !logo.startsWith('data:image/')) {
+        return res.status(400).json({ error: { message: 'Invalid image data' } })
+      }
+      // Limit to ~500 KB base64
+      if (logo.length > 700000) {
+        return res.status(400).json({ error: { message: 'Image too large — max 500 KB' } })
+      }
+      await db.query(`UPDATE companies SET logo=$1 WHERE id=$2`, [logo, req.user.company_id])
+      res.json({ message: 'Logo saved' })
+    } catch (err) { next(err) }
+  })
+
+  // DELETE /companies/logo
+  r.delete('/logo', async (req, res, next) => {
+    try {
+      await db.query(`UPDATE companies SET logo=NULL WHERE id=$1`, [req.user.company_id])
+      res.json({ message: 'Logo removed' })
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
