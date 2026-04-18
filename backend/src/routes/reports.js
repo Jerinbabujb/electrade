@@ -15,7 +15,10 @@ router.get('/balance-sheet',  ctrl.balanceSheet);
 router.get('/overdue',        ctrl.overdue);
 router.get('/ar-aging',       ctrl.arAging);
 router.get('/ap-aging',       ctrl.apAging);
-router.get('/stock',          ctrl.stockValuation);
-router.get('/bad-debt',       ctrl.badDebtCandidates);
+router.get('/stock',              ctrl.stockValuation);
+router.get('/bad-debt',           ctrl.badDebtCandidates);
+router.get('/sales-by-product',   ctrl.salesByProduct);
+router.get('/purchase-analysis',  ctrl.purchaseAnalysis);
+router.get('/inventory-at-date',  ctrl.inventoryAtDate);
 
 module.exports = router;

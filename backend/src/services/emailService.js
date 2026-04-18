@@ -236,3 +236,91 @@ exports.sendPaymentReminder = async (inv, toEmail) => {
     html,
   })
 }
+
+// ── Send team invite ──────────────────────────────────────
+// { email, company_name, role, link }
+exports.sendInvite = async ({ email, company_name, role, link }) => {
+  const html = `
+  <div style="font-family:Arial,sans-serif;font-size:13px;color:#1a1a1a;max-width:560px">
+    <div style="background:#1a5fa8;color:#fff;padding:14px 20px">
+      <h2 style="margin:0;font-size:16px">You've been invited to ${company_name}</h2>
+    </div>
+    <div style="padding:20px">
+      <p>You've been invited to join <strong>${company_name}</strong> as a <strong>${role}</strong>.</p>
+      <p style="margin-top:14px">Click the button below to set your password and access the system:</p>
+      <div style="margin:20px 0;text-align:center">
+        <a href="${link}" style="background:#1a5fa8;color:#fff;padding:12px 28px;border-radius:4px;
+           text-decoration:none;font-weight:700;font-size:14px;display:inline-block">
+          Accept Invitation
+        </a>
+      </div>
+      <p style="font-size:11px;color:#888">
+        Or copy this link: <a href="${link}" style="color:#1a5fa8">${link}</a>
+      </p>
+      <p style="font-size:11px;color:#aaa;margin-top:16px">
+        This invite expires in 7 days. If you did not expect this email, you can ignore it.
+      </p>
+    </div>
+  </div>`
+
+  await transporter.sendMail({
+    from:    `"${company_name}" <${process.env.SMTP_USER}>`,
+    to:      email,
+    subject: `You're invited to join ${company_name}`,
+    html,
+  })
+}
+
+// ── Send low-stock alert ───────────────────────────────────
+// products: [{ sku, name, category, stock_qty, stock_min, cost_price }]
+exports.sendLowStockAlert = async (products, toEmail, company_id) => {
+  const co    = await getCompany(company_id)
+  const brand = brandColor(co)
+
+  const rows = products.map(p => `
+    <tr>
+      <td style="padding:6px 10px;border:1px solid #e0e0e0;font-weight:600">${p.sku || '—'}</td>
+      <td style="padding:6px 10px;border:1px solid #e0e0e0">${p.name}</td>
+      <td style="padding:6px 10px;border:1px solid #e0e0e0;color:#888">${p.category || 'Uncategorised'}</td>
+      <td style="padding:6px 10px;border:1px solid #e0e0e0;text-align:right;color:#c62828;font-weight:700">
+        ${parseFloat(p.stock_qty).toFixed(3)}
+      </td>
+      <td style="padding:6px 10px;border:1px solid #e0e0e0;text-align:right;color:#888">
+        ${parseFloat(p.stock_min).toFixed(3)}
+      </td>
+    </tr>`).join('')
+
+  const html = `
+  <div style="font-family:Arial,sans-serif;font-size:13px;color:#1a1a1a;max-width:650px">
+    ${emailHeader(co)}
+    <div style="padding:20px">
+      <div style="background:#fff8e1;border-left:4px solid #f57f17;padding:10px 14px;margin-bottom:16px;font-size:13px">
+        <strong>⚠️ Low Stock Alert</strong> — ${products.length} product${products.length === 1 ? '' : 's'} at or below minimum stock level
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <thead>
+          <tr style="background:${brand};color:#fff">
+            <th style="padding:7px 10px;text-align:left">SKU</th>
+            <th style="padding:7px 10px;text-align:left">Product</th>
+            <th style="padding:7px 10px;text-align:left">Category</th>
+            <th style="padding:7px 10px;text-align:right">Current Stock</th>
+            <th style="padding:7px 10px;text-align:right">Min Stock</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="margin-top:16px;font-size:11px;color:#888">
+        This is an automated alert from ${co.name || 'ElecTrade'}.
+        Please review stock levels and place purchase orders as needed.
+      </p>
+    </div>
+    ${emailFooter(co)}
+  </div>`
+
+  await transporter.sendMail({
+    from:    fromAddr(co),
+    to:      toEmail,
+    subject: `[Low Stock Alert] ${products.length} product${products.length === 1 ? '' : 's'} below minimum — ${co.name || 'ElecTrade'}`,
+    html,
+  })
+}

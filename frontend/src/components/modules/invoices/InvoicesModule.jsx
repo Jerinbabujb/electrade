@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { invoiceApi } from '../../../services/api'
 import { useUIStore } from '../../../store'
@@ -45,6 +45,45 @@ export default function InvoicesModule() {
     mutationFn: (id) => invoiceApi.void(id),
     onSuccess:  () => { toast.success('Invoice voided'); qc.invalidateQueries(['invoices']) },
   })
+
+  const cloneMut = useMutation({
+    mutationFn: (id) => invoiceApi.clone(id),
+    onSuccess: (res) => {
+      const newId = res.data.data?.id
+      toast.success('Invoice cloned as draft')
+      qc.invalidateQueries(['invoices'])
+      if (newId) openModal('invoice', { id: newId })
+    },
+  })
+
+  const reminderMut = useMutation({
+    mutationFn: async (ids) => {
+      const results = await Promise.allSettled(ids.map(id => invoiceApi.sendReminder(id)))
+      const sent = results.filter(r => r.status === 'fulfilled').length
+      return sent
+    },
+    onSuccess: (sent) => {
+      toast.success(`Reminder sent for ${sent} invoice(s)`)
+      setSelectedIds([])
+    },
+  })
+
+  // Ctrl+N / Cmd+N → new invoice
+  const handleKeyDown = useCallback((e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+      e.preventDefault()
+      openModal('invoice', {})
+    }
+  }, [openModal])
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [handleKeyDown])
+
+  const overdueSelected = rows.filter(r =>
+    selectedIds.includes(r.id) && ['unpaid', 'partial', 'overdue'].includes(r.payment_status) && r.due_date && new Date(r.due_date) < new Date()
+  )
 
   const rows      = resp?.data  || []
   const totalRows = resp?.total ?? 0
@@ -109,10 +148,22 @@ export default function InvoicesModule() {
           title={bulkInvoices.length < 2 ? 'Select 2+ unpaid invoices' : `Pay ${bulkInvoices.length} invoices`}>
           <span className="btn-icon">💳</span> Bulk Pay ({selectedIds.length})
         </button>
+        <button className="btn"
+          onClick={() => primaryId && cloneMut.mutate(primaryId)}
+          disabled={!primaryId || cloneMut.isPending}
+          title="Clone invoice as new draft">
+          <span className="btn-icon">📋</span> Clone
+        </button>
         <button className="btn danger"
           onClick={() => { if (primaryId && window.confirm('Void this invoice?')) voidMut.mutate(primaryId) }}
           disabled={!primaryId}>
           <span className="btn-icon">🗑</span> Void
+        </button>
+        <button className="btn"
+          onClick={() => overdueSelected.length > 0 && window.confirm(`Send overdue reminders to ${overdueSelected.length} customer(s)?`) && reminderMut.mutate(overdueSelected.map(r => r.id))}
+          disabled={overdueSelected.length === 0 || reminderMut.isPending}
+          title={overdueSelected.length === 0 ? 'Select overdue invoices to send reminders' : `Send reminders for ${overdueSelected.length} overdue invoice(s)`}>
+          <span className="btn-icon">🔔</span> Remind ({overdueSelected.length})
         </button>
         <button className="btn" onClick={handleExportCsv} title="Export current filter to CSV">
           <span className="btn-icon">⬇</span> Export CSV

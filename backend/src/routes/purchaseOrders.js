@@ -140,10 +140,11 @@ router.put('/:id', authorize('admin','sales'), async (req, res, next) => {
 
       const { rows: [po] } = await client.query(
         `UPDATE purchase_orders SET
-           supplier_id=$1, po_date=$2, expected_date=$3, notes=$4, internal_notes=$5,
+           supplier_id=$1, po_date=COALESCE($2::date, po_date), expected_date=$3,
+           notes=$4, internal_notes=$5,
            subtotal=$6, total_vat=$7, grand_total=$8, updated_at=now()
          WHERE id=$9 AND company_id=$10 AND status IN ('draft','sent') RETURNING *`,
-        [supplier_id, po_date, expected_date||null, notes, internal_notes,
+        [supplier_id, po_date||null, expected_date||null, notes, internal_notes,
          subtotal.toFixed(3), total_vat.toFixed(3), grand_total.toFixed(3),
          req.params.id, req.user.company_id]);
       if (!po) throw Object.assign(new Error('PO not found or not editable'), { status: 404 });

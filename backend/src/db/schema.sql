@@ -84,6 +84,71 @@ CREATE INDEX idx_user_companies_user    ON user_companies(user_id);
 CREATE INDEX idx_user_companies_company ON user_companies(company_id);
 
 -- ============================================================
+-- AUDIT LOG
+-- ============================================================
+CREATE TABLE audit_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id   UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
+  user_name    TEXT,
+  action       TEXT NOT NULL,        -- e.g. 'invoice.void', 'user.role_change'
+  entity_type  TEXT NOT NULL,        -- e.g. 'invoice', 'user', 'company'
+  entity_id    TEXT,
+  entity_label TEXT,                 -- human-readable: invoice_no, user name…
+  old_value    JSONB,
+  new_value    JSONB,
+  ip           TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX audit_log_company_created ON audit_log(company_id, created_at DESC);
+CREATE INDEX audit_log_entity          ON audit_log(company_id, entity_type, entity_id);
+
+-- ============================================================
+-- AUTOMATION SETTINGS (per-company)
+-- ============================================================
+CREATE TABLE automation_settings (
+  company_id                    UUID PRIMARY KEY REFERENCES companies(id) ON DELETE CASCADE,
+  overdue_enabled               BOOLEAN NOT NULL DEFAULT false,
+  overdue_interval_days         INT     NOT NULL DEFAULT 7,
+  lowstock_enabled              BOOLEAN NOT NULL DEFAULT false,
+  lowstock_alert_email          TEXT,
+  overdue_last_run              TIMESTAMPTZ,
+  overdue_last_count            INT     NOT NULL DEFAULT 0,
+  lowstock_last_run             TIMESTAMPTZ,
+  lowstock_last_count           INT     NOT NULL DEFAULT 0,
+  updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- CUSTOMER PORTAL TOKENS
+-- ============================================================
+CREATE TABLE customer_portal_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token       TEXT UNIQUE NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(customer_id, company_id)
+);
+CREATE INDEX cpt_token ON customer_portal_tokens(token);
+
+-- ============================================================
+-- INVITE TOKENS (email invitation to join a company)
+-- ============================================================
+CREATE TABLE invite_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token       TEXT UNIQUE NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),
+  company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  invited_by  UUID REFERENCES users(id) ON DELETE SET NULL,
+  email       TEXT NOT NULL,
+  role        TEXT NOT NULL DEFAULT 'sales',
+  accepted_at TIMESTAMPTZ,
+  expires_at  TIMESTAMPTZ NOT NULL DEFAULT now() + INTERVAL '7 days',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX invite_token_idx ON invite_tokens(token);
+
+-- ============================================================
 -- CATEGORIES
 -- ============================================================
 CREATE TABLE categories (
@@ -276,6 +341,7 @@ CREATE TABLE invoice_items (
   unit_price  NUMERIC(15,3) NOT NULL,
   discount    NUMERIC(15,3) NOT NULL DEFAULT 0.000,
   vat_rate    NUMERIC(5,2)  NOT NULL DEFAULT 10.00,
+  unit_cost   NUMERIC(15,3) NOT NULL DEFAULT 0.000,   -- snapshot of cost_price at invoice time
   net_amount  NUMERIC(15,3) GENERATED ALWAYS AS ((qty * unit_price) - discount) STORED,
   vat_amount  NUMERIC(15,3) GENERATED ALWAYS AS (((qty * unit_price) - discount) * vat_rate / 100) STORED,
   line_total  NUMERIC(15,3) GENERATED ALWAYS AS (((qty * unit_price) - discount) * (1 + vat_rate / 100)) STORED

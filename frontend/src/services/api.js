@@ -46,6 +46,7 @@ export const invoiceApi = {
   bulkPayment:   (data)      => api.post('/invoices/bulk-payment', data),
   writeOff:      (id, data)  => api.post(`/invoices/${id}/write-off`, data),
   reverseWriteOff:(id)       => api.delete(`/invoices/${id}/write-off`),
+  clone:          (id)       => api.post(`/invoices/${id}/clone`),
   exportCsvUrl:  (params)    => {
     const qs = new URLSearchParams({ ...params, token: localStorage.getItem('et_token') }).toString()
     return `/api/v1/invoices/export/csv?${qs}`
@@ -65,11 +66,12 @@ export const dnApi = {
 
 // ── Customers ──────────────────────────────────
 export const customerApi = {
-  list:   (params)  => api.get('/customers', { params }),
-  get:    (id)      => api.get(`/customers/${id}`),
-  create: (data)    => api.post('/customers', data),
-  update: (id, d)   => api.put(`/customers/${id}`, d),
-  delete: (id)      => api.delete(`/customers/${id}`),
+  list:          (params)  => api.get('/customers', { params }),
+  get:           (id)      => api.get(`/customers/${id}`),
+  create:        (data)    => api.post('/customers', data),
+  update:        (id, d)   => api.put(`/customers/${id}`, d),
+  delete:        (id)      => api.delete(`/customers/${id}`),
+  generatePortal:(id)      => api.post(`/portal/generate/${id}`),
 }
 
 // ── Products ───────────────────────────────────
@@ -140,8 +142,23 @@ export const reportApi = {
   badDebt:      ()       => api.get('/reports/bad-debt'),
   arAging:      ()       => api.get('/reports/ar-aging'),
   apAging:      ()       => api.get('/reports/ap-aging'),
-  stock:        ()       => api.get('/reports/stock'),
-  statement:    (params) => api.get('/reports/statement', { params }),
+  stock:              ()       => api.get('/reports/stock'),
+  statement:          (params) => api.get('/reports/statement', { params }),
+  salesByProduct:     (params) => api.get('/reports/sales-by-product',  { params }),
+  purchaseAnalysis:   (params) => api.get('/reports/purchase-analysis', { params }),
+  inventoryAtDate:    (params) => api.get('/reports/inventory-at-date', { params }),
+}
+
+// ── Public portal (no auth token) ──────────────
+const publicApi = axios.create({ baseURL: '/api/v1' })
+export const portalApi = {
+  get:        (token)            => publicApi.get(`/portal/${token}`),
+  getPdfUrl:  (token, invoiceId) => `/api/v1/portal/${token}/invoices/${invoiceId}/pdf`,
+}
+export const inviteApi = {
+  get:    (token) => publicApi.get(`/auth/accept-invite/${token}`),
+  accept: (token, data) => publicApi.post(`/auth/accept-invite/${token}`, data),
+  send:   (companyId, data) => api.post(`/companies/${companyId}/invite`, data),
 }
 
 // ── Cheques ────────────────────────────────────
@@ -277,13 +294,29 @@ export const contraApi = {
   reverse:       (entryId)       => api.delete(`/contra-accounts/entries/${entryId}`),
 }
 
+// ── Automation ─────────────────────────────────
+export const automationApi = {
+  get:    ()      => api.get('/automation'),
+  save:   (data)  => api.put('/automation', data),
+  runNow: (job)   => api.post('/automation/run-now', { job }),
+}
+
+// ── Audit Log ──────────────────────────────────
+export const auditApi = {
+  list:    (params) => api.get('/audit-log',         { params }),
+  actions: ()       => api.get('/audit-log/actions'),
+}
+
 // ── Analytics ──────────────────────────────────
 export const analyticsApi = {
   stockVelocity:    (params) => api.get('/analytics/stock-velocity',     { params }),
   grossMargin:      (params) => api.get('/analytics/gross-margin',       { params }),
-  grossMarginDetail:(params) => api.get('/analytics/gross-margin/detail',{ params }),
+  grossMarginDetail:(params) => api.get('/analytics/gross-margin/detail', { params }),
   topCustomers:     (params) => api.get('/analytics/top-customers',      { params }),
   supplierPricing:  (params) => api.get('/analytics/supplier-pricing',   { params }),
+  topProducts:      (params) => api.get('/analytics/top-products',       { params }),
+  salesTrend:       (params) => api.get('/analytics/sales-trend',        { params }),
+  deadStock:        (params) => api.get('/analytics/dead-stock',         { params }),
 }
 
 // ── Auth ───────────────────────────────────────

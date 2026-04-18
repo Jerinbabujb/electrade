@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { authApi, companyApi } from '../../../services/api'
+import { authApi, companyApi, auditApi, automationApi, inviteApi } from '../../../services/api'
 import { useAuthStore } from '../../../store'
 import toast from 'react-hot-toast'
 import api from '../../../services/api'
@@ -204,10 +204,315 @@ function EditUserModal({ u, onClose }) {
   )
 }
 
+// ── Automation Tab ─────────────────────────────────────────
+function AutomationTab() {
+  const qc = useQueryClient()
+  const { data, isLoading } = useQuery({
+    queryKey: ['automation-settings'],
+    queryFn:  () => automationApi.get().then(r => r.data.data),
+  })
+
+  const [form, setForm] = useState(null)
+  const [running, setRunning] = useState(null)  // 'overdue' | 'lowstock' | null
+
+  // Sync form with fetched data
+  if (data && !form) {
+    setForm({
+      overdue_enabled:       data.overdue_enabled       ?? false,
+      overdue_interval_days: data.overdue_interval_days ?? 7,
+      lowstock_enabled:      data.lowstock_enabled      ?? false,
+      lowstock_alert_email:  data.lowstock_alert_email  ?? '',
+    })
+  }
+
+  const saveMut = useMutation({
+    mutationFn: () => automationApi.save(form),
+    onSuccess:  () => { toast.success('Automation settings saved'); qc.invalidateQueries(['automation-settings']) },
+    onError:    (e) => toast.error(e.response?.data?.error?.message || 'Save failed'),
+  })
+
+  const runJob = async (job, label) => {
+    setRunning(job)
+    try {
+      const { data: res } = await automationApi.runNow(job)
+      const r = res.results || {}
+      const parts = []
+      if (r.overdue)  parts.push(`${r.overdue.sent  ?? 0} reminder${r.overdue.sent  === 1 ? '' : 's'} sent`)
+      if (r.lowstock) parts.push(`${r.lowstock.alerts_sent ?? 0} alert${r.lowstock.alerts_sent === 1 ? '' : 's'} sent`)
+      toast.success(`${label}: ${parts.join(', ') || 'done'}`)
+      qc.invalidateQueries(['automation-settings'])
+    } catch (e) {
+      toast.error(e.response?.data?.error?.message || `${label} failed`)
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  const fmtRun = (ts, count, noun) => {
+    if (!ts) return 'Never run'
+    const d = new Date(ts)
+    return `Last run: ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${count} ${noun}${count === 1 ? '' : 's'} sent`
+  }
+
+  if (isLoading || !form) return <div style={{ padding: 20, color: '#888' }}>Loading…</div>
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+
+  const card = (children, enabled) => (
+    <div style={{
+      border: `1px solid ${enabled ? '#b0c8f0' : '#e0e0e0'}`,
+      borderRadius: 6, padding: '14px 18px',
+      background: enabled ? '#f7faff' : '#fafafa',
+      display: 'flex', flexDirection: 'column', gap: 10,
+    }}>
+      {children}
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 640 }}>
+      <div style={{ fontSize: 11, color: '#888' }}>
+        Automation jobs run daily at 08:00. Use "Run Now" to test without waiting.
+        Email delivery requires SMTP to be configured (SMTP_HOST, SMTP_USER, SMTP_PASS env vars).
+      </div>
+
+      {/* Overdue Reminders */}
+      {card(<>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1 }}>
+            <input type="checkbox" checked={form.overdue_enabled}
+              onChange={e => set('overdue_enabled', e.target.checked)} />
+            <span style={{ fontWeight: 700, fontSize: 13 }}>📬 Overdue Invoice Reminders</span>
+          </label>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }}
+            disabled={running === 'overdue'} onClick={() => runJob('overdue', 'Overdue reminders')}>
+            {running === 'overdue' ? 'Running…' : 'Run Now'}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: '#555' }}>
+          Automatically emails customers with unpaid overdue invoices (tax invoices only).
+          Customers without a registered email address are skipped.
+        </div>
+        {form.overdue_enabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: '#555' }}>Send at most once every</span>
+            <select value={form.overdue_interval_days}
+              onChange={e => set('overdue_interval_days', Number(e.target.value))}
+              style={{ fontSize: 12, padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }}>
+              {[1, 3, 7, 14, 30].map(d => (
+                <option key={d} value={d}>{d} day{d === 1 ? '' : 's'}</option>
+              ))}
+            </select>
+            <span style={{ fontSize: 12, color: '#555' }}>per invoice</span>
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: '#aaa' }}>
+          {fmtRun(data?.overdue_last_run, data?.overdue_last_count ?? 0, 'reminder')}
+        </div>
+      </>, form.overdue_enabled)}
+
+      {/* Low-Stock Alerts */}
+      {card(<>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1 }}>
+            <input type="checkbox" checked={form.lowstock_enabled}
+              onChange={e => set('lowstock_enabled', e.target.checked)} />
+            <span style={{ fontWeight: 700, fontSize: 13 }}>📦 Low-Stock Alerts</span>
+          </label>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }}
+            disabled={running === 'lowstock'} onClick={() => runJob('lowstock', 'Low-stock alert')}>
+            {running === 'lowstock' ? 'Running…' : 'Run Now'}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: '#555' }}>
+          Sends one consolidated email listing all stock-tracked products where
+          current stock ≤ minimum stock. Only products with a minimum stock level set are included.
+        </div>
+        {form.lowstock_enabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: '#555' }}>Alert email:</span>
+            <input type="email" value={form.lowstock_alert_email}
+              onChange={e => set('lowstock_alert_email', e.target.value)}
+              placeholder="warehouse@company.com"
+              style={{ flex: 1, fontSize: 12, padding: '4px 8px',
+                       border: '1px solid #ccc', borderRadius: 4 }} />
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: '#aaa' }}>
+          {fmtRun(data?.lowstock_last_run, data?.lowstock_last_count ?? 0, 'alert')}
+        </div>
+      </>, form.lowstock_enabled)}
+
+      {/* Save */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn btn-primary" onClick={() => saveMut.mutate()}
+          disabled={saveMut.isPending}>
+          {saveMut.isPending ? 'Saving…' : 'Save Settings'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Audit Log Tab ──────────────────────────────────────────
+const ACTION_LABELS = {
+  'invoice.void':          { label: 'Invoice Voided',        color: '#c62828', bg: '#ffebee' },
+  'invoice.payment_added': { label: 'Payment Added',         color: '#1565c0', bg: '#e3f2fd' },
+  'user.created':          { label: 'User Created',          color: '#2e7d32', bg: '#e8f5e9' },
+  'user.role_change':      { label: 'Role Changed',          color: '#e65100', bg: '#fff3e0' },
+  'user.activated':        { label: 'User Activated',        color: '#2e7d32', bg: '#e8f5e9' },
+  'user.deactivated':      { label: 'User Deactivated',      color: '#c62828', bg: '#ffebee' },
+  'company.user_added':    { label: 'User Added to Company', color: '#1565c0', bg: '#e3f2fd' },
+  'company.user_removed':  { label: 'User Removed',         color: '#c62828', bg: '#ffebee' },
+  'auth.company_switch':   { label: 'Company Switched',      color: '#6a1b9a', bg: '#f3e5f5' },
+}
+
+function ActionBadge({ action }) {
+  const s = ACTION_LABELS[action] || { label: action, color: '#555', bg: '#f0f0f0' }
+  return (
+    <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                   background: s.bg, color: s.color, whiteSpace: 'nowrap' }}>
+      {s.label}
+    </span>
+  )
+}
+
+function AuditLogTab() {
+  const [page,       setPage]       = useState(1)
+  const [filterUser, setFilterUser] = useState('')
+  const [filterAction, setFilterAction] = useState('')
+  const [filterFrom, setFilterFrom] = useState('')
+  const [filterTo,   setFilterTo]   = useState('')
+
+  const params = {
+    page, limit: 50,
+    ...(filterUser   && { user_id: filterUser }),
+    ...(filterAction && { action: filterAction }),
+    ...(filterFrom   && { from: filterFrom }),
+    ...(filterTo     && { to: filterTo }),
+  }
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['audit-log', params],
+    queryFn:  () => auditApi.list(params).then(r => r.data),
+    keepPreviousData: true,
+  })
+  const { data: actionsData } = useQuery({
+    queryKey: ['audit-log-actions'],
+    queryFn:  () => auditApi.actions().then(r => r.data.data),
+  })
+
+  const rows   = data?.data  || []
+  const total  = data?.total || 0
+  const pages  = data?.pages || 1
+
+  const fmtTs = (ts) => {
+    if (!ts) return '—'
+    const d = new Date(ts)
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const formatDiff = (oldV, newV) => {
+    if (!oldV && !newV) return null
+    if (oldV?.role && newV?.role) return `${oldV.role} → ${newV.role}`
+    if (newV?.amount) return `BHD ${parseFloat(newV.amount).toFixed(3)}`
+    if (newV?.role)   return `Role: ${newV.role}`
+    return null
+  }
+
+  const reset = () => { setPage(1); setFilterUser(''); setFilterAction(''); setFilterFrom(''); setFilterTo('') }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Filters */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={filterAction} onChange={e => { setFilterAction(e.target.value); setPage(1) }}
+          style={{ fontSize: 12, padding: '4px 6px', border: '1px solid #ccc', borderRadius: 4 }}>
+          <option value="">All Actions</option>
+          {(actionsData || []).map(a => (
+            <option key={a} value={a}>{ACTION_LABELS[a]?.label || a}</option>
+          ))}
+        </select>
+        <input type="date" value={filterFrom} onChange={e => { setFilterFrom(e.target.value); setPage(1) }}
+          style={{ fontSize: 12, padding: '4px 6px', border: '1px solid #ccc', borderRadius: 4 }} />
+        <span style={{ fontSize: 11, color: '#888' }}>to</span>
+        <input type="date" value={filterTo} onChange={e => { setFilterTo(e.target.value); setPage(1) }}
+          style={{ fontSize: 12, padding: '4px 6px', border: '1px solid #ccc', borderRadius: 4 }} />
+        {(filterAction || filterFrom || filterTo) && (
+          <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={reset}>
+            Clear
+          </button>
+        )}
+        <span style={{ fontSize: 11, color: '#aaa', marginLeft: 'auto' }}>
+          {total} {total === 1 ? 'entry' : 'entries'}
+        </span>
+      </div>
+
+      {/* Table */}
+      <div style={{ overflow: 'auto' }}>
+        <table className="data-table" style={{ fontSize: 12 }}>
+          <thead><tr>
+            <th style={{ minWidth: 130 }}>Time</th>
+            <th>User</th>
+            <th>Action</th>
+            <th>Entity</th>
+            <th>Detail</th>
+            <th>IP</th>
+          </tr></thead>
+          <tbody>
+            {isLoading && <tr className="empty-row"><td colSpan={6}>Loading…</td></tr>}
+            {!isLoading && !rows.length && (
+              <tr className="empty-row"><td colSpan={6}>No audit entries found</td></tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td style={{ color: '#888', whiteSpace: 'nowrap' }}>{fmtTs(r.created_at)}</td>
+                <td style={{ fontWeight: 600 }}>{r.user_name || '—'}</td>
+                <td><ActionBadge action={r.action} /></td>
+                <td>
+                  {r.entity_label
+                    ? <><span style={{ fontWeight: 600 }}>{r.entity_label}</span>
+                        <span style={{ fontSize: 10, color: '#aaa', marginLeft: 4 }}>({r.entity_type})</span></>
+                    : <span style={{ color: '#aaa' }}>{r.entity_type}</span>}
+                </td>
+                <td style={{ color: '#555', fontSize: 11 }}>
+                  {formatDiff(r.old_value, r.new_value) || '—'}
+                </td>
+                <td style={{ color: '#aaa', fontSize: 11 }}>{r.ip || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {pages > 1 && (
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'flex-end' }}>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }}
+            disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
+            ‹ Prev
+          </button>
+          <span style={{ fontSize: 11, color: '#888' }}>Page {page} of {pages}</span>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }}
+            disabled={page >= pages} onClick={() => setPage(p => p + 1)}>
+            Next ›
+          </button>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: '#aaa' }}>
+        Admin-only · Captures invoice voids, payments, user management, and company switches
+      </div>
+    </div>
+  )
+}
+
 // ── Companies Tab ──────────────────────────────────────────
 function CompanyUsersPanel({ company, currentUserId }) {
   const qc = useQueryClient()
-  const [addForm, setAddForm] = useState({ email: '', role: 'sales' })
+  const [addForm,    setAddForm]    = useState({ email: '', role: 'sales' })
+  const [inviteForm, setInviteForm] = useState({ email: '', role: 'sales' })
+  const [addMode,    setAddMode]    = useState('existing') // 'existing' | 'invite'
   const key = ['company-users', company.id]
 
   const { data: usersData, isFetching } = useQuery({
@@ -221,6 +526,14 @@ function CompanyUsersPanel({ company, currentUserId }) {
       toast.success('User added')
       qc.invalidateQueries(key)
       setAddForm({ email: '', role: 'sales' })
+    },
+  })
+
+  const inviteMut = useMutation({
+    mutationFn: () => inviteApi.send(company.id, inviteForm),
+    onSuccess: () => {
+      toast.success(`Invite sent to ${inviteForm.email}`)
+      setInviteForm({ email: '', role: 'sales' })
     },
   })
 
@@ -257,28 +570,83 @@ function CompanyUsersPanel({ company, currentUserId }) {
           </table>
         )
       }
-      <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, color: '#444' }}>Grant access to existing user</div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-        <div className="field" style={{ flex: 2, marginBottom: 0 }}>
-          <label style={{ fontSize: 11 }}>Email address</label>
-          <input value={addForm.email} onChange={e => setAddForm(f => ({ ...f, email: e.target.value }))}
-            placeholder="user@example.com" style={{ fontSize: 12 }} />
-        </div>
-        <div className="field" style={{ flex: 1, marginBottom: 0 }}>
-          <label style={{ fontSize: 11 }}>Role</label>
-          <select value={addForm.role} onChange={e => setAddForm(f => ({ ...f, role: e.target.value }))} style={{ fontSize: 12 }}>
-            <option value="admin">Admin</option>
-            <option value="sales">Sales</option>
-            <option value="storekeeper">Storekeeper</option>
-            <option value="accountant">Accountant</option>
-          </select>
-        </div>
-        <button className="btn primary" style={{ fontSize: 12, marginBottom: 1 }}
-          disabled={addMut.isPending || !addForm.email}
-          onClick={() => addMut.mutate()}>
-          {addMut.isPending ? '⏳' : '＋ Add'}
-        </button>
+
+      {/* Toggle between add-existing and invite */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+        {[['existing', '＋ Add Existing User'], ['invite', '✉ Invite by Email']].map(([mode, label]) => (
+          <button key={mode} className={`btn${addMode === mode ? ' primary' : ''}`}
+            style={{ fontSize: 11, padding: '3px 10px' }}
+            onClick={() => setAddMode(mode)}>
+            {label}
+          </button>
+        ))}
       </div>
+
+      {addMode === 'existing' && (
+        <>
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+            Add a user who already has an ElecTrade account.
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div className="field" style={{ flex: 2, marginBottom: 0 }}>
+              <label style={{ fontSize: 11 }}>Email address</label>
+              <input value={addForm.email} onChange={e => setAddForm(f => ({ ...f, email: e.target.value }))}
+                placeholder="user@example.com" style={{ fontSize: 12 }} />
+            </div>
+            <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+              <label style={{ fontSize: 11 }}>Role</label>
+              <select value={addForm.role} onChange={e => setAddForm(f => ({ ...f, role: e.target.value }))} style={{ fontSize: 12 }}>
+                <option value="admin">Admin</option>
+                <option value="sales">Sales</option>
+                <option value="storekeeper">Storekeeper</option>
+                <option value="accountant">Accountant</option>
+              </select>
+            </div>
+            <button className="btn primary" style={{ fontSize: 12, marginBottom: 1 }}
+              disabled={addMut.isPending || !addForm.email}
+              onClick={() => addMut.mutate()}>
+              {addMut.isPending ? '⏳' : '＋ Add'}
+            </button>
+          </div>
+        </>
+      )}
+
+      {addMode === 'invite' && (
+        <>
+          <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>
+            Send an invitation email. The recipient will set their own password when they accept.
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <div className="field" style={{ flex: 2, marginBottom: 0 }}>
+              <label style={{ fontSize: 11 }}>Email address</label>
+              <input value={inviteForm.email} onChange={e => setInviteForm(f => ({ ...f, email: e.target.value }))}
+                placeholder="newuser@example.com" style={{ fontSize: 12 }} />
+            </div>
+            <div className="field" style={{ flex: 1, marginBottom: 0 }}>
+              <label style={{ fontSize: 11 }}>Role</label>
+              <select value={inviteForm.role} onChange={e => setInviteForm(f => ({ ...f, role: e.target.value }))} style={{ fontSize: 12 }}>
+                <option value="admin">Admin</option>
+                <option value="sales">Sales</option>
+                <option value="storekeeper">Storekeeper</option>
+                <option value="accountant">Accountant</option>
+              </select>
+            </div>
+            <button className="btn primary" style={{ fontSize: 12, marginBottom: 1, background: '#6a1b9a', borderColor: '#6a1b9a' }}
+              disabled={inviteMut.isPending || !inviteForm.email}
+              onClick={() => inviteMut.mutate()}>
+              {inviteMut.isPending ? '⏳' : '✉ Send Invite'}
+            </button>
+          </div>
+          {inviteMut.isError && (
+            <div style={{ fontSize: 11, color: 'var(--red)', marginTop: 6 }}>
+              {inviteMut.error?.response?.data?.error?.message || 'Failed to send invite'}
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: '#888', marginTop: 6 }}>
+            Invite link expires after 7 days.
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -450,7 +818,7 @@ export default function SettingsModule() {
       <div className="module-title">Settings</div>
       <div className="tab-bar">
         {[['company','Company'],['tax','VAT & Tax'],['users','Users & Access'],
-          ...(user?.role==='admin' ? [['companies','Companies']] : []),
+          ...(user?.role==='admin' ? [['companies','Companies'],['automation','Automation'],['audit','Audit Log']] : []),
           ['invoice','Invoice Templates'],
           ...(user?.role==='admin' ? [['import','Import Data'],['sinvoice','Simple Invoice'],['backup','Backups'],['demo','Demo & Reset']] : [])
         ].map(([id,label])=>(
@@ -588,7 +956,9 @@ export default function SettingsModule() {
           </div>
         )}
 
-        {tab==='companies' && <CompaniesTab currentUserId={user?.id} />}
+        {tab==='companies'  && <CompaniesTab currentUserId={user?.id} />}
+        {tab==='automation' && user?.role==='admin' && <AutomationTab />}
+        {tab==='audit'      && user?.role==='admin' && <AuditLogTab />}
 
         {tab==='import'   && user?.role==='admin' && <ImportTab />}
         {tab==='sinvoice' && user?.role==='admin' && <SimpleInvoiceImportTab />}

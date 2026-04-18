@@ -22,5 +22,6 @@ router.get   ('/:id/payments',        ctrl.getPayments);
 
 // Consolidate multiple DNs into one invoice
 router.post  ('/from-dns',            authorize('admin','sales'),       ctrl.createFromDNs);
+router.post  ('/:id/clone',           authorize('admin','sales'),       ctrl.clone);
 
 module.exports = router;

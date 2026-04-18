@@ -204,7 +204,7 @@ function StockVelocityTab() {
 function GrossMarginTab() {
   const [from,     setFrom]     = useState(yearStart)
   const [to,       setTo]       = useState(today)
-  const [expanded, setExpanded] = useState(null)   // category name currently drilled into
+  const [expanded, setExpanded] = useState(null)   // { id: uuid|null, name: string }
 
   const { data, isLoading } = useQuery({
     queryKey: ['analytics-margin', from, to],
@@ -212,8 +212,8 @@ function GrossMarginTab() {
   })
 
   const { data: detailData, isLoading: detailLoading } = useQuery({
-    queryKey: ['analytics-margin-detail', expanded, from, to],
-    queryFn:  () => analyticsApi.grossMarginDetail({ category: expanded, from, to }).then(r => r.data),
+    queryKey: ['analytics-margin-detail', expanded?.id, from, to],
+    queryFn:  () => analyticsApi.grossMarginDetail({ category_id: expanded?.id ?? 'null', from, to }).then(r => r.data),
     enabled:  !!expanded,
   })
 
@@ -221,7 +221,9 @@ function GrossMarginTab() {
   const totals     = data?.totals     || {}
   const detailRows = detailData?.data || []
 
-  const toggleExpand = (cat) => setExpanded(prev => prev === cat ? null : cat)
+  const toggleExpand = (r) => setExpanded(prev =>
+    prev?.id === r.category_id ? null : { id: r.category_id, name: r.category }
+  )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -255,11 +257,11 @@ function GrossMarginTab() {
               <tr className="empty-row"><td colSpan={7}>No sales data for this period</td></tr>
             )}
             {rows.map(r => {
-              const isOpen = expanded === r.category
+              const isOpen = expanded?.id === r.category_id
               return [
                 /* Category row */
                 <tr key={r.category}
-                  onClick={() => toggleExpand(r.category)}
+                  onClick={() => toggleExpand(r)}
                   style={{ cursor: 'pointer', background: isOpen ? '#e8f0fe' : 'inherit' }}
                   onMouseEnter={e => { if (!isOpen) e.currentTarget.style.background = '#f5f5f5' }}
                   onMouseLeave={e => { if (!isOpen) e.currentTarget.style.background = 'inherit' }}>
@@ -434,7 +436,7 @@ function TopCustomersTab() {
         </table>
       </div>
       <div style={{ fontSize: 11, color: '#aaa' }}>
-        Margin is estimated using product master cost price · Revenue includes VAT
+        Margin is estimated using cost price snapshotted at invoice time · Revenue = net (excl. VAT)
       </div>
     </div>
   )
@@ -590,13 +592,413 @@ function SupplierPricingTab() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  TAB 5 — Top Products
+// ═════════════════════════════════════════════════════════════════════════════
+function TopProductsTab() {
+  const [from,  setFrom]  = useState(yearStart)
+  const [to,    setTo]    = useState(today)
+  const [limit, setLimit] = useState(20)
+  const [sort,  setSort]  = useState('revenue')
+  const [catId, setCatId] = useState('')
+
+  const { data: catData } = useQuery({
+    queryKey: ['categories', 'product'],
+    queryFn:  () => categoryApi.list('product').then(r => r.data.data),
+  })
+  const { data, isLoading } = useQuery({
+    queryKey: ['analytics-top-products', from, to, limit, sort, catId],
+    queryFn:  () => analyticsApi.topProducts({
+      from, to, limit, sort, category_id: catId || undefined
+    }).then(r => r.data),
+    keepPreviousData: true,
+  })
+
+  const rows = data?.data || []
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <DateRangePicker from={from} to={to} onFrom={setFrom} onTo={setTo} />
+        <select value={catId} onChange={e => setCatId(e.target.value)}
+          style={{ fontSize: 12, padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }}>
+          <option value="">All Categories</option>
+          {(catData || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>Sort:</span>
+        {[['revenue','Revenue'],['qty','Qty Sold'],['profit','Profit']].map(([v, label]) => (
+          <button key={v} className="btn"
+            style={{ fontSize: 11, padding: '2px 8px',
+                     background: sort === v ? 'var(--blue)' : '',
+                     color:      sort === v ? '#fff' : '' }}
+            onClick={() => setSort(v)}>
+            {label}
+          </button>
+        ))}
+        <span style={{ fontSize: 11, color: '#888', marginLeft: 8 }}>Top:</span>
+        {[10, 20, 50].map(n => (
+          <button key={n} className="btn"
+            style={{ fontSize: 11, padding: '2px 8px',
+                     background: limit === n ? 'var(--blue)' : '',
+                     color:      limit === n ? '#fff' : '' }}
+            onClick={() => setLimit(n)}>
+            {n}
+          </button>
+        ))}
+      </div>
+
+      {/* KPI cards */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <KpiCard label="Products Shown" value={rows.length} />
+        <KpiCard label="Total Revenue"
+          value={`BHD ${fmtBhd(rows.reduce((s, r) => s + parseFloat(r.net_revenue || 0), 0))}`}
+          color="#1565c0" />
+        <KpiCard label="Total COGS"
+          value={`BHD ${fmtBhd(rows.reduce((s, r) => s + parseFloat(r.total_cogs || 0), 0))}`}
+          color="#888" />
+        <KpiCard label="Gross Profit"
+          value={`BHD ${fmtBhd(rows.reduce((s, r) => s + parseFloat(r.gross_profit || 0), 0))}`}
+          color="#2e7d32" />
+      </div>
+
+      {/* Table */}
+      <div style={{ overflow: 'auto', flex: 1 }}>
+        <table className="data-table" style={{ fontSize: 12 }}>
+          <thead><tr>
+            <th className="center">#</th>
+            <th>Product</th>
+            <th>Category</th>
+            <th className="right">Invoices</th>
+            <th className="right">Qty Sold</th>
+            <th className="right">Revenue</th>
+            <th className="right">COGS</th>
+            <th className="right">Gross Profit</th>
+            <th style={{ minWidth: 120 }}>Margin</th>
+          </tr></thead>
+          <tbody>
+            {isLoading && <tr className="empty-row"><td colSpan={9}>Loading…</td></tr>}
+            {!isLoading && !rows.length && (
+              <tr className="empty-row"><td colSpan={9}>No sales in this period</td></tr>
+            )}
+            {rows.map((r, i) => (
+              <tr key={r.product_id}>
+                <td className="center" style={{ color: '#aaa', fontWeight: 700 }}>
+                  {i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}
+                </td>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{r.product_name}</div>
+                  <div style={{ fontSize: 10, color: '#aaa' }}>{r.sku}</div>
+                </td>
+                <td>
+                  <span style={{ fontSize: 11, background: '#f0f4ff', color: '#1565c0',
+                                 padding: '1px 6px', borderRadius: 8 }}>
+                    {r.category}
+                  </span>
+                </td>
+                <td className="right">{r.invoice_count}</td>
+                <td className="right">{parseFloat(r.qty_sold).toFixed(3)}</td>
+                <td className="right" style={{ fontWeight: 600 }}>{fmtBhd(r.net_revenue)}</td>
+                <td className="right" style={{ color: '#888' }}>{fmtBhd(r.total_cogs)}</td>
+                <td className="right"
+                  style={{ color: parseFloat(r.gross_profit) >= 0 ? '#2e7d32' : '#c62828', fontWeight: 600 }}>
+                  {fmtBhd(r.gross_profit)}
+                </td>
+                <td><MarginBar pct={r.margin_pct} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: '#aaa' }}>
+        Margin is estimated using cost price snapshotted at invoice time · Revenue = net (excl. VAT)
+      </div>
+    </div>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  TAB 6 — Sales Trend
+// ═════════════════════════════════════════════════════════════════════════════
+function SalesTrendTab() {
+  const lastYearStart = `${thisYear - 1}-01-01`
+  const [from, setFrom] = useState(lastYearStart)
+  const [to,   setTo]   = useState(today)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['analytics-sales-trend', from, to],
+    queryFn:  () => analyticsApi.salesTrend({ from, to }).then(r => r.data),
+    keepPreviousData: true,
+  })
+
+  const rows = data?.data || []
+  const maxRevenue = Math.max(...rows.map(r => parseFloat(r.net_revenue || 0)), 1)
+
+  const totals = rows.reduce((acc, r) => {
+    acc.revenue += parseFloat(r.net_revenue || 0)
+    acc.cogs    += parseFloat(r.total_cogs  || 0)
+    acc.profit  += parseFloat(r.gross_profit || 0)
+    acc.invoices += r.invoice_count || 0
+    return acc
+  }, { revenue: 0, cogs: 0, profit: 0, invoices: 0 })
+  totals.margin_pct = totals.revenue > 0
+    ? ((totals.profit / totals.revenue) * 100).toFixed(1)
+    : '0.0'
+
+  const presets = [
+    { label: 'Last 12M', from: new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10), to: today },
+    { label: 'Last 24M', from: `${thisYear - 2}-01-01`, to: today },
+    { label: 'This Year', from: yearStart, to: today },
+    { label: 'Last Year', from: `${thisYear - 1}-01-01`, to: `${thisYear - 1}-12-31` },
+  ]
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <input type="date" value={from} onChange={e => setFrom(e.target.value)}
+          style={{ fontSize: 12, padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} />
+        <span style={{ fontSize: 11, color: '#888' }}>to</span>
+        <input type="date" value={to} onChange={e => setTo(e.target.value)}
+          style={{ fontSize: 12, padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4 }} />
+        {presets.map(p => (
+          <button key={p.label} className="btn"
+            style={{ fontSize: 11, padding: '2px 8px',
+                     background: from === p.from && to === p.to ? 'var(--blue)' : '',
+                     color:      from === p.from && to === p.to ? '#fff' : '' }}
+            onClick={() => { setFrom(p.from); setTo(p.to) }}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      {/* KPI cards */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <KpiCard label="Months"         value={rows.length} />
+        <KpiCard label="Total Revenue"  value={`BHD ${fmtBhd(totals.revenue)}`}  color="#1565c0" />
+        <KpiCard label="Gross Profit"   value={`BHD ${fmtBhd(totals.profit)}`}   color="#2e7d32" />
+        <KpiCard label="Avg Margin"     value={`${totals.margin_pct}%`}           color={parseFloat(totals.margin_pct) >= 20 ? '#2e7d32' : '#f57f17'} />
+        <KpiCard label="Total Invoices" value={totals.invoices} />
+      </div>
+
+      {/* Bar chart */}
+      {rows.length > 0 && (
+        <div style={{ background: '#fff', border: '1px solid #e0e0e0', borderRadius: 6, padding: '10px 14px' }}>
+          <div style={{ fontSize: 11, color: '#888', marginBottom: 8 }}>Monthly Revenue vs Gross Profit</div>
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: 4, height: 100, overflowX: 'auto' }}>
+            {rows.map(r => {
+              const revH    = (parseFloat(r.net_revenue  || 0) / maxRevenue) * 90
+              const profitH = (parseFloat(r.gross_profit || 0) / maxRevenue) * 90
+              return (
+                <div key={r.period_label}
+                  style={{ display: 'flex', flexDirection: 'column', alignItems: 'center',
+                           gap: 2, minWidth: 28, flex: 1, maxWidth: 48 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 90 }}>
+                    <div title={`Revenue: BHD ${fmtBhd(r.net_revenue)}`}
+                      style={{ width: 10, height: Math.max(2, revH),
+                               background: '#1565c0', borderRadius: '2px 2px 0 0' }} />
+                    <div title={`Profit: BHD ${fmtBhd(r.gross_profit)}`}
+                      style={{ width: 10, height: Math.max(2, profitH),
+                               background: parseFloat(r.gross_profit) >= 0 ? '#2e7d32' : '#c62828',
+                               borderRadius: '2px 2px 0 0' }} />
+                  </div>
+                  <div style={{ fontSize: 9, color: '#aaa', transform: 'rotate(-45deg)',
+                                transformOrigin: 'center', whiteSpace: 'nowrap', marginTop: 6 }}>
+                    {r.period_label}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 14, marginTop: 24, fontSize: 11, color: '#888' }}>
+            <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#1565c0', borderRadius: 2, marginRight: 4 }} />Revenue</span>
+            <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#2e7d32', borderRadius: 2, marginRight: 4 }} />Gross Profit</span>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      <div style={{ overflow: 'auto', flex: 1 }}>
+        <table className="data-table" style={{ fontSize: 12 }}>
+          <thead><tr>
+            <th>Month</th>
+            <th className="right">Invoices</th>
+            <th className="right">Qty Sold</th>
+            <th className="right">Revenue</th>
+            <th className="right">COGS</th>
+            <th className="right">Gross Profit</th>
+            <th style={{ minWidth: 120 }}>Margin</th>
+          </tr></thead>
+          <tbody>
+            {isLoading && <tr className="empty-row"><td colSpan={7}>Loading…</td></tr>}
+            {!isLoading && !rows.length && (
+              <tr className="empty-row"><td colSpan={7}>No data in this period</td></tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.period_label}>
+                <td style={{ fontWeight: 600 }}>{r.period_label}</td>
+                <td className="right">{r.invoice_count}</td>
+                <td className="right">{parseFloat(r.qty_sold || 0).toFixed(0)}</td>
+                <td className="right" style={{ fontWeight: 600 }}>{fmtBhd(r.net_revenue)}</td>
+                <td className="right" style={{ color: '#888' }}>{fmtBhd(r.total_cogs)}</td>
+                <td className="right"
+                  style={{ color: parseFloat(r.gross_profit) >= 0 ? '#2e7d32' : '#c62828', fontWeight: 600 }}>
+                  {fmtBhd(r.gross_profit)}
+                </td>
+                <td><MarginBar pct={r.margin_pct} /></td>
+              </tr>
+            ))}
+            {rows.length > 1 && (
+              <tr style={{ fontWeight: 700, background: '#f8f8f8', borderTop: '2px solid #ddd' }}>
+                <td>Total</td>
+                <td className="right">{totals.invoices}</td>
+                <td className="right">{rows.reduce((s, r) => s + parseFloat(r.qty_sold || 0), 0).toFixed(0)}</td>
+                <td className="right">{fmtBhd(totals.revenue)}</td>
+                <td className="right" style={{ color: '#888' }}>{fmtBhd(totals.cogs)}</td>
+                <td className="right" style={{ color: totals.profit >= 0 ? '#2e7d32' : '#c62828' }}>
+                  {fmtBhd(totals.profit)}
+                </td>
+                <td><MarginBar pct={totals.margin_pct} /></td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: '#aaa' }}>
+        Monthly buckets · Revenue = net (excl. VAT) · COGS uses cost snapshotted at invoice time
+      </div>
+    </div>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  TAB 7 — Dead Stock
+// ═════════════════════════════════════════════════════════════════════════════
+function DeadStockTab() {
+  const [days,  setDays]  = useState(90)
+  const [catId, setCatId] = useState('')
+
+  const { data: catData } = useQuery({
+    queryKey: ['categories', 'product'],
+    queryFn:  () => categoryApi.list('product').then(r => r.data.data),
+  })
+  const { data, isLoading } = useQuery({
+    queryKey: ['analytics-dead-stock', days, catId],
+    queryFn:  () => analyticsApi.deadStock({ days, category_id: catId || undefined }).then(r => r.data),
+  })
+
+  const rows    = data?.data    || []
+  const summary = data?.summary || {}
+
+  const dayOptions = [30, 60, 90, 180, 365]
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Controls */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12, color: '#555', fontWeight: 600 }}>No sales in last:</span>
+        {dayOptions.map(d => (
+          <button key={d} className="btn"
+            style={{ fontSize: 11, padding: '2px 8px',
+                     background: days === d ? 'var(--blue)' : '',
+                     color:      days === d ? '#fff' : '' }}
+            onClick={() => setDays(d)}>
+            {d}d
+          </button>
+        ))}
+        <select value={catId} onChange={e => setCatId(e.target.value)}
+          style={{ fontSize: 12, padding: '3px 6px', border: '1px solid #ccc', borderRadius: 4, marginLeft: 8 }}>
+          <option value="">All Categories</option>
+          {(catData || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </div>
+
+      {/* KPI cards */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <KpiCard label="Dead Stock Products" value={summary.total_products || 0} color="#c62828" />
+        <KpiCard label="Never Sold"         value={summary.never_sold     || 0} color="#b71c1c" />
+        <KpiCard label="No Recent Sale"     value={summary.no_recent_sale || 0} color="#e53935" />
+        <KpiCard label="Capital Tied Up"
+          value={`BHD ${fmtBhd(summary.total_stock_value || 0)}`}
+          color="#f57f17"
+          sub={`across ${summary.total_products || 0} products`} />
+      </div>
+
+      {/* Table */}
+      <div style={{ overflow: 'auto', flex: 1 }}>
+        <table className="data-table" style={{ fontSize: 12 }}>
+          <thead><tr>
+            <th>Product</th>
+            <th>Category</th>
+            <th className="right">Stock Qty</th>
+            <th className="right">Cost Price</th>
+            <th className="right">Stock Value</th>
+            <th className="right">Last Sale</th>
+            <th className="right">Days Idle</th>
+            <th>Status</th>
+          </tr></thead>
+          <tbody>
+            {isLoading && <tr className="empty-row"><td colSpan={8}>Loading…</td></tr>}
+            {!isLoading && !rows.length && (
+              <tr className="empty-row"><td colSpan={8}>No dead stock found for this threshold</td></tr>
+            )}
+            {rows.map(r => {
+              const isNever = r.dead_reason === 'never_sold'
+              return (
+                <tr key={r.id}>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{r.name}</div>
+                    <div style={{ fontSize: 10, color: '#aaa' }}>{r.sku}</div>
+                  </td>
+                  <td>
+                    <span style={{ fontSize: 11, background: '#f0f4ff', color: '#1565c0',
+                                   padding: '1px 6px', borderRadius: 8 }}>
+                      {r.category}
+                    </span>
+                  </td>
+                  <td className="right">{parseFloat(r.stock_qty).toFixed(3)}</td>
+                  <td className="right" style={{ color: '#888' }}>{fmtBhd(r.cost_price)}</td>
+                  <td className="right" style={{ fontWeight: 600, color: '#f57f17' }}>
+                    {fmtBhd(r.stock_value)}
+                  </td>
+                  <td className="right" style={{ color: '#888' }}>
+                    {r.last_sale_date ? fmtDate(r.last_sale_date) : '—'}
+                  </td>
+                  <td className="right" style={{ color: '#c62828', fontWeight: 600 }}>
+                    {r.days_since_last_sale != null ? `${r.days_since_last_sale}d` : '∞'}
+                  </td>
+                  <td>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
+                      background: isNever ? '#ffebee' : '#fff8e1',
+                      color:      isNever ? '#b71c1c' : '#e65100',
+                    }}>
+                      {isNever ? 'Never Sold' : 'No Recent Sale'}
+                    </span>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11, color: '#aaa' }}>
+        Only stock-tracked products with stock qty &gt; 0 · Sorted by capital tied up (highest first)
+      </div>
+    </div>
+  )
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  MAIN MODULE
 // ═════════════════════════════════════════════════════════════════════════════
 const TABS = [
-  { id: 'velocity',  label: '📦 Stock Velocity' },
-  { id: 'margin',    label: '💰 Gross Margin'   },
-  { id: 'customers', label: '👥 Top Customers'  },
-  { id: 'suppliers', label: '🏭 Supplier Pricing' },
+  { id: 'velocity',  label: '📦 Stock Velocity'   },
+  { id: 'margin',    label: '💰 Gross Margin'      },
+  { id: 'customers', label: '👥 Top Customers'     },
+  { id: 'suppliers', label: '🏭 Supplier Pricing'  },
+  { id: 'products',  label: '🏆 Top Products'      },
+  { id: 'trend',     label: '📈 Sales Trend'       },
+  { id: 'deadstock', label: '🪦 Dead Stock'        },
 ]
 
 export default function AnalyticsModule() {
@@ -629,6 +1031,9 @@ export default function AnalyticsModule() {
         {tab === 'margin'    && <GrossMarginTab />}
         {tab === 'customers' && <TopCustomersTab />}
         {tab === 'suppliers' && <SupplierPricingTab />}
+        {tab === 'products'  && <TopProductsTab />}
+        {tab === 'trend'     && <SalesTrendTab />}
+        {tab === 'deadstock' && <DeadStockTab />}
       </div>
 
       <div className="status-bar">

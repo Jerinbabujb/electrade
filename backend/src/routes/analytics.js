@@ -90,17 +90,18 @@ r.get('/gross-margin', async (req, res, next) => {
     const { rows } = await db.query(`
       WITH items AS (
         SELECT
+          cat.id                                                           AS category_id,
           COALESCE(cat.name, 'Uncategorised')                             AS category,
           ii.net_amount::numeric                                           AS net_amount,
           ii.qty::numeric                                                  AS qty,
-          COALESCE(p.cost_price, 0)::numeric                              AS cost_price,
+          ii.unit_cost::numeric                                            AS unit_cost,
           CASE WHEN i.subtotal > 0
             THEN i.total_discount::numeric * (ii.net_amount::numeric / i.subtotal::numeric)
             ELSE 0
           END                                                              AS discount_share
         FROM invoice_items ii
         JOIN invoices  i   ON  ii.invoice_id  = i.id
-        JOIN products  p   ON  ii.product_id  = p.id
+        LEFT JOIN products  p   ON  ii.product_id  = p.id
         LEFT JOIN categories cat ON cat.id = p.category_id
         WHERE i.company_id     = $1
           AND i.type           = 'tax_invoice'
@@ -108,19 +109,20 @@ r.get('/gross-margin', async (req, res, next) => {
           AND i.invoice_date BETWEEN $2 AND $3
       )
       SELECT
+        category_id,
         category,
         COUNT(*)::int                                                      AS line_count,
         ROUND(SUM(net_amount),        3)                                  AS net_revenue,
-        ROUND(SUM(qty * cost_price),  3)                                  AS total_cogs,
-        ROUND(SUM(net_amount) - SUM(qty * cost_price), 3)                AS gross_profit,
+        ROUND(SUM(qty * unit_cost),   3)                                  AS total_cogs,
+        ROUND(SUM(net_amount) - SUM(qty * unit_cost), 3)                 AS gross_profit,
         ROUND(
           CASE WHEN SUM(net_amount) > 0
-            THEN (SUM(net_amount) - SUM(qty * cost_price)) / SUM(net_amount) * 100
+            THEN (SUM(net_amount) - SUM(qty * unit_cost)) / SUM(net_amount) * 100
             ELSE 0
           END, 1)                                                          AS margin_pct,
         ROUND(SUM(discount_share), 3)                                    AS total_discount
       FROM items
-      GROUP BY category
+      GROUP BY category_id, category
       ORDER BY gross_profit DESC
     `, [co, from, to])
 
@@ -140,13 +142,19 @@ r.get('/gross-margin', async (req, res, next) => {
 })
 
 // ── Gross Margin drill-down — products within a category ─────────────────────
-// ?category=<name>&from=YYYY-MM-DD&to=YYYY-MM-DD
+// ?category_id=<uuid|null>&from=YYYY-MM-DD&to=YYYY-MM-DD
 r.get('/gross-margin/detail', async (req, res, next) => {
   try {
-    const co       = req.user.company_id
-    const category = req.query.category || ''
-    const from     = req.query.from || new Date().getFullYear() + '-01-01'
-    const to       = req.query.to   || new Date().toISOString().slice(0, 10)
+    const co          = req.user.company_id
+    const from        = req.query.from || new Date().getFullYear() + '-01-01'
+    const to          = req.query.to   || new Date().toISOString().slice(0, 10)
+    const isNull      = !req.query.category_id || req.query.category_id === 'null'
+    const category_id = isNull ? null : req.query.category_id
+
+    const params      = isNull ? [co, from, to] : [co, from, to, category_id]
+    const catFilter   = isNull
+      ? 'AND p.category_id IS NULL'
+      : 'AND p.category_id = $4'
 
     const { rows } = await db.query(`
       WITH items AS (
@@ -156,7 +164,7 @@ r.get('/gross-margin/detail', async (req, res, next) => {
           p.name                                                           AS product_name,
           ii.net_amount::numeric                                           AS net_amount,
           ii.qty::numeric                                                  AS qty,
-          COALESCE(p.cost_price, 0)::numeric                              AS cost_price,
+          ii.unit_cost::numeric                                            AS unit_cost,
           CASE WHEN i.subtotal > 0
             THEN i.total_discount::numeric * (ii.net_amount::numeric / i.subtotal::numeric)
             ELSE 0
@@ -164,22 +172,21 @@ r.get('/gross-margin/detail', async (req, res, next) => {
         FROM invoice_items ii
         JOIN invoices  i   ON  ii.invoice_id  = i.id
         JOIN products  p   ON  ii.product_id  = p.id
-        LEFT JOIN categories cat ON cat.id = p.category_id
         WHERE i.company_id     = $1
           AND i.type           = 'tax_invoice'
           AND i.payment_status != 'void'
           AND i.invoice_date BETWEEN $2 AND $3
-          AND COALESCE(cat.name, 'Uncategorised') = $4
+          ${catFilter}
       )
       SELECT
         product_id, sku, product_name,
         COUNT(*)::int                                                      AS line_count,
         ROUND(SUM(net_amount),        3)                                  AS net_revenue,
-        ROUND(SUM(qty * cost_price),  3)                                  AS total_cogs,
-        ROUND(SUM(net_amount) - SUM(qty * cost_price), 3)                AS gross_profit,
+        ROUND(SUM(qty * unit_cost),   3)                                  AS total_cogs,
+        ROUND(SUM(net_amount) - SUM(qty * unit_cost), 3)                 AS gross_profit,
         ROUND(
           CASE WHEN SUM(net_amount) > 0
-            THEN (SUM(net_amount) - SUM(qty * cost_price)) / SUM(net_amount) * 100
+            THEN (SUM(net_amount) - SUM(qty * unit_cost)) / SUM(net_amount) * 100
             ELSE 0
           END, 1)                                                          AS margin_pct,
         ROUND(SUM(discount_share), 3)                                    AS total_discount
@@ -187,9 +194,9 @@ r.get('/gross-margin/detail', async (req, res, next) => {
       GROUP BY product_id, sku, product_name
       ORDER BY gross_profit DESC
       LIMIT 200
-    `, [co, from, to, category])
+    `, params)
 
-    res.json({ data: rows, category, from, to })
+    res.json({ data: rows, category_id, from, to })
   } catch (err) { next(err) }
 })
 
@@ -207,8 +214,7 @@ r.get('/top-customers', async (req, res, next) => {
         SELECT
           customer_id,
           COUNT(*)::int              AS invoice_count,
-          SUM(grand_total)::numeric  AS total_revenue,
-          SUM(subtotal)::numeric     AS total_subtotal,
+          SUM(subtotal)::numeric     AS net_revenue,
           SUM(balance_due)::numeric  AS outstanding,
           MAX(invoice_date)          AS last_invoice_date
         FROM invoices
@@ -221,10 +227,9 @@ r.get('/top-customers', async (req, res, next) => {
       cogs_totals AS (
         SELECT
           i.customer_id,
-          SUM(ii.qty::numeric * COALESCE(p.cost_price, 0)::numeric) AS total_cogs
+          SUM(ii.qty::numeric * ii.unit_cost::numeric) AS total_cogs
         FROM invoice_items ii
-        JOIN invoices  i ON ii.invoice_id  = i.id
-        JOIN products  p ON ii.product_id  = p.id
+        JOIN invoices i ON ii.invoice_id = i.id
         WHERE i.company_id     = $1
           AND i.type           = 'tax_invoice'
           AND i.payment_status != 'void'
@@ -236,22 +241,22 @@ r.get('/top-customers', async (req, res, next) => {
         COALESCE(c.customer_category, c.type::text, 'customer') AS category,
         c.price_tier,
         it.invoice_count,
-        ROUND(it.total_revenue,  3)                          AS total_revenue,
-        ROUND(it.outstanding,    3)                          AS outstanding,
-        ROUND(COALESCE(ct.total_cogs, 0), 3)                AS total_cogs,
-        ROUND(it.total_subtotal - COALESCE(ct.total_cogs, 0), 3) AS est_gross_profit,
+        ROUND(it.net_revenue,    3)                              AS net_revenue,
+        ROUND(it.outstanding,    3)                              AS outstanding,
+        ROUND(COALESCE(ct.total_cogs, 0), 3)                    AS total_cogs,
+        ROUND(it.net_revenue - COALESCE(ct.total_cogs, 0), 3)  AS est_gross_profit,
         ROUND(
-          CASE WHEN it.total_subtotal > 0
-            THEN (it.total_subtotal - COALESCE(ct.total_cogs, 0)) / it.total_subtotal * 100
+          CASE WHEN it.net_revenue > 0
+            THEN (it.net_revenue - COALESCE(ct.total_cogs, 0)) / it.net_revenue * 100
             ELSE 0
-          END, 1)                                            AS est_margin_pct,
+          END, 1)                                                AS est_margin_pct,
         it.last_invoice_date,
-        (CURRENT_DATE - it.last_invoice_date::date)::int    AS days_since_last
+        (CURRENT_DATE - it.last_invoice_date::date)::int        AS days_since_last
       FROM customers c
       JOIN inv_totals  it ON it.customer_id = c.id
       LEFT JOIN cogs_totals ct ON ct.customer_id = c.id
       WHERE c.company_id = $1
-      ORDER BY total_revenue DESC
+      ORDER BY net_revenue DESC
       LIMIT $4
     `, [co, from, to, limit])
 
@@ -309,6 +314,181 @@ r.get('/supplier-pricing', async (req, res, next) => {
     `, params)
 
     res.json({ data: rows, months })
+  } catch (err) { next(err) }
+})
+
+// ── Top Products ──────────────────────────────────────────────────────────────
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=20&category_id=<uuid>&sort=revenue|qty|profit
+r.get('/top-products', async (req, res, next) => {
+  try {
+    const co    = req.user.company_id
+    const from  = req.query.from  || new Date().getFullYear() + '-01-01'
+    const to    = req.query.to    || new Date().toISOString().slice(0, 10)
+    const limit = Math.min(200, parseInt(req.query.limit) || 20)
+    const sort  = ['revenue', 'qty', 'profit'].includes(req.query.sort) ? req.query.sort : 'revenue'
+
+    const params = [co, from, to]
+    const catFilter = req.query.category_id
+      ? `AND p.category_id = $${params.push(req.query.category_id)}`
+      : ''
+
+    const orderCol = sort === 'qty' ? 'qty_sold' : sort === 'profit' ? 'gross_profit' : 'net_revenue'
+
+    const { rows } = await db.query(`
+      SELECT
+        p.id                                                             AS product_id,
+        p.sku,
+        p.name                                                           AS product_name,
+        COALESCE(cat.name, 'Uncategorised')                             AS category,
+        COUNT(DISTINCT ii.invoice_id)::int                              AS invoice_count,
+        ROUND(SUM(ii.qty::numeric), 3)                                  AS qty_sold,
+        ROUND(SUM(ii.net_amount::numeric), 3)                           AS net_revenue,
+        ROUND(SUM(ii.qty::numeric * ii.unit_cost::numeric), 3)          AS total_cogs,
+        ROUND(SUM(ii.net_amount::numeric)
+              - SUM(ii.qty::numeric * ii.unit_cost::numeric), 3)        AS gross_profit,
+        ROUND(
+          CASE WHEN SUM(ii.net_amount::numeric) > 0
+            THEN (SUM(ii.net_amount::numeric)
+                  - SUM(ii.qty::numeric * ii.unit_cost::numeric))
+                 / SUM(ii.net_amount::numeric) * 100
+            ELSE 0
+          END, 1)                                                        AS margin_pct
+      FROM invoice_items ii
+      JOIN invoices  i   ON ii.invoice_id  = i.id
+      JOIN products  p   ON ii.product_id  = p.id
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      WHERE i.company_id     = $1
+        AND i.type           = 'tax_invoice'
+        AND i.payment_status != 'void'
+        AND i.invoice_date BETWEEN $2 AND $3
+        ${catFilter}
+      GROUP BY p.id, p.sku, p.name, cat.name
+      ORDER BY ${orderCol} DESC
+      LIMIT $${params.push(limit)}
+    `, params)
+
+    res.json({ data: rows, from, to, sort })
+  } catch (err) { next(err) }
+})
+
+// ── Sales Trend ───────────────────────────────────────────────────────────────
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD&period=month
+r.get('/sales-trend', async (req, res, next) => {
+  try {
+    const co   = req.user.company_id
+    const from = req.query.from || (new Date().getFullYear() - 1) + '-01-01'
+    const to   = req.query.to   || new Date().toISOString().slice(0, 10)
+
+    const { rows } = await db.query(`
+      WITH months AS (
+        SELECT
+          date_trunc('month', i.invoice_date)::date     AS period_start,
+          to_char(i.invoice_date, 'YYYY-MM')            AS period_label,
+          COUNT(DISTINCT i.id)::int                     AS invoice_count,
+          ROUND(SUM(i.subtotal::numeric), 3)            AS net_revenue
+        FROM invoices i
+        WHERE i.company_id     = $1
+          AND i.type           = 'tax_invoice'
+          AND i.payment_status != 'void'
+          AND i.invoice_date BETWEEN $2 AND $3
+        GROUP BY date_trunc('month', i.invoice_date), to_char(i.invoice_date, 'YYYY-MM')
+      ),
+      cogs AS (
+        SELECT
+          date_trunc('month', i.invoice_date)::date     AS period_start,
+          ROUND(SUM(ii.qty::numeric * ii.unit_cost::numeric), 3) AS total_cogs,
+          ROUND(SUM(ii.qty::numeric), 3)                AS qty_sold
+        FROM invoice_items ii
+        JOIN invoices i ON ii.invoice_id = i.id
+        WHERE i.company_id     = $1
+          AND i.type           = 'tax_invoice'
+          AND i.payment_status != 'void'
+          AND i.invoice_date BETWEEN $2 AND $3
+        GROUP BY date_trunc('month', i.invoice_date)
+      )
+      SELECT
+        m.period_start,
+        m.period_label,
+        m.invoice_count,
+        m.net_revenue,
+        COALESCE(c.total_cogs, 0)                                     AS total_cogs,
+        ROUND(m.net_revenue - COALESCE(c.total_cogs, 0), 3)           AS gross_profit,
+        ROUND(
+          CASE WHEN m.net_revenue > 0
+            THEN (m.net_revenue - COALESCE(c.total_cogs, 0)) / m.net_revenue * 100
+            ELSE 0
+          END, 1)                                                      AS margin_pct,
+        COALESCE(c.qty_sold, 0)                                        AS qty_sold
+      FROM months m
+      LEFT JOIN cogs c ON c.period_start = m.period_start
+      ORDER BY m.period_start
+    `, [co, from, to])
+
+    res.json({ data: rows, from, to })
+  } catch (err) { next(err) }
+})
+
+// ── Dead Stock ────────────────────────────────────────────────────────────────
+// ?days=90&category_id=<uuid>
+r.get('/dead-stock', async (req, res, next) => {
+  try {
+    const co   = req.user.company_id
+    const days = Math.max(1, parseInt(req.query.days) || 90)
+
+    const params = [co, days]
+    const catFilter = req.query.category_id
+      ? `AND p.category_id = $${params.push(req.query.category_id)}`
+      : ''
+
+    const { rows } = await db.query(`
+      SELECT
+        p.id, p.sku, p.name,
+        COALESCE(cat.name, 'Uncategorised')             AS category,
+        p.stock_qty::numeric                            AS stock_qty,
+        p.cost_price::numeric                           AS cost_price,
+        ROUND(p.stock_qty::numeric * p.cost_price::numeric, 3) AS stock_value,
+        last_sale.last_sale_date,
+        CASE
+          WHEN last_sale.last_sale_date IS NULL THEN NULL
+          ELSE (CURRENT_DATE - last_sale.last_sale_date::date)::int
+        END                                             AS days_since_last_sale,
+        CASE
+          WHEN last_sale.last_sale_date IS NULL THEN 'never_sold'
+          ELSE 'no_recent_sale'
+        END                                             AS dead_reason
+      FROM products p
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      LEFT JOIN (
+        SELECT ii.product_id, MAX(i.invoice_date) AS last_sale_date
+        FROM invoice_items ii
+        JOIN invoices i
+          ON  i.id             = ii.invoice_id
+          AND i.company_id     = $1
+          AND i.type           = 'tax_invoice'
+          AND i.payment_status != 'void'
+        GROUP BY ii.product_id
+      ) last_sale ON last_sale.product_id = p.id
+      WHERE p.company_id     = $1
+        AND p.is_active       = TRUE
+        AND p.is_stock_tracked = TRUE
+        AND p.stock_qty       > 0
+        AND (
+          last_sale.last_sale_date IS NULL
+          OR last_sale.last_sale_date < CURRENT_DATE - ($2::int * INTERVAL '1 day')
+        )
+        ${catFilter}
+      ORDER BY stock_value DESC
+      LIMIT 500
+    `, params)
+
+    const summary = {
+      total_products: rows.length,
+      never_sold:     rows.filter(r => r.dead_reason === 'never_sold').length,
+      no_recent_sale: rows.filter(r => r.dead_reason === 'no_recent_sale').length,
+      total_stock_value: rows.reduce((s, r) => s + +r.stock_value, 0).toFixed(3),
+    }
+
+    res.json({ data: rows, summary, period_days: days })
   } catch (err) { next(err) }
 })
 

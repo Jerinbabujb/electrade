@@ -50,6 +50,9 @@ app.use('/api/v1/crm',               require('./routes/crm'))
 app.use('/api/v1/purchase-orders',   require('./routes/purchaseOrders'))
 app.use('/api/v1/contra-accounts',   require('./routes/contra'))
 app.use('/api/v1/analytics',         require('./routes/analytics'))
+app.use('/api/v1/audit-log',         require('./routes/auditLog'))
+app.use('/api/v1/automation',        require('./routes/automation'))
+app.use('/api/v1/portal',            require('./routes/portal'))
 
 app.get('/health', (_, res) => res.json({ status: 'ok', ts: new Date().toISOString() }))
 app.use((req, res) => res.status(404).json({ error: { message: `Route not found: ${req.method} ${req.path}` } }))
@@ -64,7 +67,9 @@ runMigrations()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`ElecTrade API on port ${PORT}`)
-      require('./services/scheduler').init()
+      const sched = require('./services/scheduler')
+      sched.init()
+      sched.reloadAutomation()
     })
   })
   .catch(err => {

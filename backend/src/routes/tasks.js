@@ -174,7 +174,11 @@ router.get('/', async (req, res, next) => {
 router.get('/users', async (req, res, next) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, role FROM users WHERE company_id=$1 AND is_active=true ORDER BY name`,
+      `SELECT u.id, u.name, uc.role
+       FROM user_companies uc
+       JOIN users u ON u.id = uc.user_id
+       WHERE uc.company_id=$1 AND u.is_active=true
+       ORDER BY u.name`,
       [req.user.company_id]);
     res.json({ data: rows });
   } catch (e) { next(e); }

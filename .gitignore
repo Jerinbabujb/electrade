@@ -33,5 +33,3 @@ electrade_backup*/
 
 # Misc dev files
 *.local
-{backend
-backend;C

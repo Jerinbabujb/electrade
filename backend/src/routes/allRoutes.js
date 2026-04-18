@@ -1,7 +1,9 @@
 const { Router } = require('express')
 const db  = require('../db')
 const { v4: uuid } = require('uuid')
-const { authenticate, authorize } = require('../middleware/auth')
+const { authenticate, authorize, invalidateAuthCache } = require('../middleware/auth')
+const audit    = require('../utils/auditLog')
+const emailSvc = require('../services/emailService')
 
 // ── Generic CRUD factory ───────────────────────────────────
 const crud = ({ table, idField = 'id', companyField = 'company_id', listSql, getSql, createFn, updateFn }) => {
@@ -466,8 +468,7 @@ module.exports.purchasesRouter = (() => {
              payment_status = CASE
                WHEN amount_paid + $1 >= grand_total THEN 'paid'
                WHEN amount_paid + $1 > 0 THEN 'partial'
-               ELSE payment_status END,
-             updated_at = now()
+               ELSE payment_status END
            WHERE id = $2`, [amount, req.params.id])
       })
       res.status(201).json({ message: 'Payment recorded' })
@@ -534,7 +535,7 @@ module.exports.expensesRouter = (() => {
       const total_amount = parseFloat(net_amount) + parseFloat(vat_amount||0)
       const { rows: [row] } = await db.query(
         `UPDATE expenses SET category_id=$1, expense_date=$2, description=$3,
-           net_amount=$4, vat_amount=$5, total_amount=$6, notes=$7, updated_at=now()
+           net_amount=$4, vat_amount=$5, total_amount=$6, notes=$7
          WHERE id=$8 AND company_id=$9 RETURNING *`,
         [category_id||null, expense_date, description, net_amount, vat_amount||0,
          total_amount.toFixed(3), notes||null, req.params.id, req.user.company_id])
@@ -812,6 +813,9 @@ module.exports.companiesRouter = (() => {
          ON CONFLICT (user_id, company_id) DO UPDATE SET role=$4`,
         [uuid(), target.id, req.params.id, role||'sales'])
 
+      invalidateAuthCache(target.id, req.params.id)
+      await audit.log(db, req, 'company.user_added', 'user', target.id, target.name,
+        null, { company_id: req.params.id, role: role||'sales' })
       res.status(201).json({ data: { message: `${target.name} added`, user: target } })
     } catch (err) {
       if (err._status) return res.status(err._status).json({ error: { message: err.message } })
@@ -848,10 +852,56 @@ module.exports.companiesRouter = (() => {
           return res.status(400).json({ error: { message: 'Cannot remove the last admin of a company. Assign another admin first.' } })
       }
 
+      const { rows: [removedUser] } = await db.query(
+        `SELECT name FROM users WHERE id=$1`, [req.params.userId])
       await db.query(
         `DELETE FROM user_companies WHERE user_id=$1 AND company_id=$2`,
         [req.params.userId, req.params.id])
+      invalidateAuthCache(req.params.userId, req.params.id)
+      await audit.log(db, req, 'company.user_removed', 'user', req.params.userId,
+        removedUser?.name, { company_id: req.params.id })
       res.json({ message: 'User removed from company' })
+    } catch (err) {
+      if (err._status) return res.status(err._status).json({ error: { message: err.message } })
+      next(err)
+    }
+  })
+
+  // POST /companies/:id/invite — send email invite to a new or existing user
+  r.post('/:id/invite', async (req, res, next) => {
+    try {
+      const { email, role } = req.body
+      if (!email) return res.status(400).json({ error: { message: 'Email required' } })
+
+      await requireAdminOfCompany(req.user.id, req.params.id)
+
+      const { rows: [co] } = await db.query(
+        `SELECT name FROM companies WHERE id=$1`, [req.params.id])
+
+      // Invalidate any prior pending invite for same email+company
+      await db.query(
+        `DELETE FROM invite_tokens WHERE email=$1 AND company_id=$2 AND accepted_at IS NULL`,
+        [email.toLowerCase(), req.params.id])
+
+      const { rows: [inv] } = await db.query(`
+        INSERT INTO invite_tokens (company_id, invited_by, email, role)
+        VALUES ($1,$2,$3,$4) RETURNING token
+      `, [req.params.id, req.user.id, email.toLowerCase(), role || 'sales'])
+
+      const origin = req.headers.origin || 'http://localhost'
+      const link   = `${origin}/invite/${inv.token}`
+
+      // Send invite email (best-effort — don't fail if SMTP not configured)
+      try {
+        await emailSvc.sendInvite({ email: email.toLowerCase(), company_name: co.name, role: role||'sales', link })
+      } catch (emailErr) {
+        console.warn('[invite] Email failed (SMTP may not be configured):', emailErr.message)
+      }
+
+      await audit.log(db, req, 'company.invite_sent', 'user', null, email,
+        null, { company_id: req.params.id, role: role||'sales' })
+
+      res.status(201).json({ data: { message: `Invite sent to ${email}`, link } })
     } catch (err) {
       if (err._status) return res.status(err._status).json({ error: { message: err.message } })
       next(err)

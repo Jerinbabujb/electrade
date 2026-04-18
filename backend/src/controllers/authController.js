@@ -2,6 +2,7 @@ const db      = require('../db')
 const bcrypt  = require('bcryptjs')
 const jwt     = require('jsonwebtoken')
 const { v4: uuid } = require('uuid')
+const audit   = require('../utils/auditLog')
 
 const sign = ({ id, company_id, role, name }) =>
   jwt.sign({ id, company_id, role, name }, process.env.JWT_SECRET, { expiresIn: '12h' })
@@ -93,6 +94,8 @@ exports.switchCompany = async (req, res, next) => {
     const token     = sign({ id: user.id, company_id: uc.id, role: uc.role, name: user.name })
     const companies = await getUserCompanies(user.id)
 
+    await audit.log(db, req, 'auth.company_switch', 'company', uc.id, uc.name,
+      { company_id: req.user.company_id }, { company_id: uc.id })
     res.json({
       token,
       user: {
@@ -156,6 +159,8 @@ exports.createUser = async (req, res, next) => {
       return user
     })
 
+    await audit.log(db, req, 'user.created', 'user', result.id, result.name,
+      null, { email: result.email, role: result.role })
     res.status(201).json({ data: result })
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: { message: 'Email already in use' } })
@@ -170,7 +175,9 @@ exports.updateUser = async (req, res, next) => {
 
     // Verify target user belongs to this company
     const { rows: [check] } = await db.query(
-      `SELECT user_id FROM user_companies WHERE user_id = $1 AND company_id = $2`,
+      `SELECT u.name, uc.role AS old_role FROM user_companies uc
+       JOIN users u ON u.id = uc.user_id
+       WHERE uc.user_id = $1 AND uc.company_id = $2`,
       [req.params.id, req.user.company_id])
     if (!check) return res.status(404).json({ error: { message: 'User not found' } })
 
@@ -189,9 +196,11 @@ exports.updateUser = async (req, res, next) => {
 
     // Update role in user_companies (role is per-company)
     if (role !== undefined) {
+      const { invalidateAuthCache } = require('../middleware/auth')
       await db.query(
         `UPDATE user_companies SET role=$1 WHERE user_id=$2 AND company_id=$3`,
         [role, req.params.id, req.user.company_id])
+      invalidateAuthCache(req.params.id, req.user.company_id)
     }
 
     const { rows: [u] } = await db.query(
@@ -200,6 +209,15 @@ exports.updateUser = async (req, res, next) => {
        JOIN user_companies uc ON uc.user_id = u.id AND uc.company_id = $2
        WHERE u.id = $1`,
       [req.params.id, req.user.company_id])
+
+    // Audit role changes and status changes
+    if (role !== undefined && role !== check.old_role) {
+      await audit.log(db, req, 'user.role_change', 'user', req.params.id, check.name,
+        { role: check.old_role }, { role })
+    } else if (is_active !== undefined) {
+      await audit.log(db, req, is_active ? 'user.activated' : 'user.deactivated',
+        'user', req.params.id, check.name)
+    }
 
     res.json({ data: u })
   } catch (err) {
@@ -223,4 +241,102 @@ exports.changePassword = async (req, res, next) => {
     await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [hash, req.params.id])
     res.json({ message: 'Password updated' })
   } catch (err) { next(err) }
+}
+
+// ── Invite flow ────────────────────────────────────────────────────────────────
+
+// GET /api/v1/auth/accept-invite/:token  — public, returns invite metadata
+exports.getInvite = async (req, res, next) => {
+  try {
+    const { rows: [inv] } = await db.query(`
+      SELECT it.id, it.email, it.role, it.accepted_at, it.expires_at,
+             c.name AS company_name
+      FROM invite_tokens it
+      JOIN companies c ON c.id = it.company_id
+      WHERE it.token = $1
+    `, [req.params.token])
+
+    if (!inv) return res.status(404).json({ error: { message: 'Invalid invite link' } })
+    if (inv.accepted_at) return res.status(410).json({ error: { message: 'This invite has already been accepted' } })
+    if (new Date(inv.expires_at) < new Date())
+      return res.status(410).json({ error: { message: 'This invite link has expired' } })
+
+    res.json({ data: { email: inv.email, role: inv.role, company_name: inv.company_name } })
+  } catch (err) { next(err) }
+}
+
+// POST /api/v1/auth/accept-invite/:token  — public, sets name+password, creates user
+exports.acceptInvite = async (req, res, next) => {
+  try {
+    const { name, password } = req.body
+    if (!name || !password) return res.status(400).json({ error: { message: 'Name and password required' } })
+
+    const { rows: [inv] } = await db.query(`
+      SELECT it.*, c.name AS company_name
+      FROM invite_tokens it
+      JOIN companies c ON c.id = it.company_id
+      WHERE it.token = $1
+    `, [req.params.token])
+
+    if (!inv)            return res.status(404).json({ error: { message: 'Invalid invite link' } })
+    if (inv.accepted_at) return res.status(410).json({ error: { message: 'Already accepted' } })
+    if (new Date(inv.expires_at) < new Date())
+      return res.status(410).json({ error: { message: 'Invite link has expired' } })
+
+    const hash   = await bcrypt.hash(password, 12)
+    const userId = uuid()
+
+    const user = await db.withTransaction(async (client) => {
+      // Check if user with this email already exists
+      const { rows: [existing] } = await client.query(
+        `SELECT id FROM users WHERE email = $1`, [inv.email.toLowerCase()])
+
+      let targetId
+      if (existing) {
+        targetId = existing.id
+      } else {
+        await client.query(
+          `INSERT INTO users (id, company_id, name, email, password_hash, role)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [userId, inv.company_id, name, inv.email.toLowerCase(), hash, inv.role])
+        targetId = userId
+      }
+
+      // Grant company access
+      await client.query(`
+        INSERT INTO user_companies (id, user_id, company_id, role, is_default)
+        VALUES ($1,$2,$3,$4,true)
+        ON CONFLICT (user_id, company_id) DO UPDATE SET role = $4
+      `, [uuid(), targetId, inv.company_id, inv.role])
+
+      // Mark invite as accepted
+      await client.query(
+        `UPDATE invite_tokens SET accepted_at = now() WHERE id = $1`, [inv.id])
+
+      const { rows: [u] } = await client.query(
+        `SELECT id, name, email FROM users WHERE id = $1`, [targetId])
+      return u
+    })
+
+    // Issue a token so they're logged in immediately
+    const companies = await getUserCompanies(user.id)
+    const activeCompany = companies.find(c => c.id === inv.company_id) || companies[0]
+    const token = sign({ id: user.id, company_id: inv.company_id, role: inv.role, name: user.name })
+
+    res.json({
+      token,
+      user: {
+        id:         user.id,
+        name:       user.name,
+        email:      user.email,
+        role:       inv.role,
+        company_id: inv.company_id,
+        company:    activeCompany,
+        companies:  companies.map(c => ({ id: c.id, name: c.name, role: c.role })),
+      }
+    })
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: { message: 'Email already in use' } })
+    next(err)
+  }
 }

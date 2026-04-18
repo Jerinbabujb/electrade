@@ -21,6 +21,9 @@ const REPORT_NAV = [
   { id: 'sales',        label: 'Sales by Period' },
   { id: 'customer',     label: 'Sales by Customer' },
   { id: 'dn_pending',   label: 'DN Pending Invoice' },
+  { id: 'sales_product',label: 'Sales by Product' },
+  { section: 'Procurement' },
+  { id: 'purchase_analysis', label: 'Purchase Analysis' },
   { section: 'Financial' },
   { id: 'pl',           label: 'Profit & Loss' },
   { id: 'bs',           label: 'Balance Sheet' },
@@ -28,6 +31,7 @@ const REPORT_NAV = [
   { section: 'Inventory' },
   { id: 'stock',        label: 'Stock Valuation' },
   { id: 'lowstock',     label: 'Low Stock Alert' },
+  { id: 'inventory_date', label: 'Inventory at Date' },
 ]
 
 // ── Print helper ───────────────────────────────────────────
@@ -99,6 +103,9 @@ export default function ReportsModule() {
   const [active,  setActive]  = useState('vat')
   const [from,    setFrom]    = useState(() => `${new Date().getFullYear()}-01-01`)
   const [to,      setTo]      = useState(() => new Date().toISOString().slice(0, 10))
+  const [spSortBy, setSpSortBy] = useState('revenue')
+  const [paMode,   setPaMode]   = useState('supplier')
+  const [invDate,  setInvDate]  = useState(() => new Date().toISOString().slice(0, 10))
 
   const { data: vatData, refetch: runVat } = useQuery({
     queryKey: ['report-vat', from, to],
@@ -140,6 +147,21 @@ export default function ReportsModule() {
     queryFn:  () => reportApi.badDebt().then(r => r.data),
     enabled:  false,
   })
+  const { data: salesProductData, refetch: runSalesProduct, isFetching: spLoading } = useQuery({
+    queryKey: ['report-sales-product', from, to, spSortBy],
+    queryFn:  () => reportApi.salesByProduct({ from, to, sort_by: spSortBy }).then(r => r.data.data),
+    enabled:  false,
+  })
+  const { data: purchaseAnalysisData, refetch: runPurchaseAnalysis, isFetching: paLoading } = useQuery({
+    queryKey: ['report-purchase-analysis', from, to, paMode],
+    queryFn:  () => reportApi.purchaseAnalysis({ from, to, group_by: paMode }).then(r => r.data.data),
+    enabled:  false,
+  })
+  const { data: inventoryDateData, refetch: runInventoryDate, isFetching: idLoading } = useQuery({
+    queryKey: ['report-inventory-date', invDate],
+    queryFn:  () => reportApi.inventoryAtDate({ as_at: invDate }).then(r => r.data.data),
+    enabled:  false,
+  })
 
   const handleRun = () => {
     if (active === 'vat')      runVat()
@@ -150,6 +172,9 @@ export default function ReportsModule() {
     if (active === 'ap_aging') runApAging()
     if (active === 'stock' || active === 'lowstock') runStock()
     if (active === 'bad_debt') runBadDebt()
+    if (active === 'sales_product')    runSalesProduct()
+    if (active === 'purchase_analysis') runPurchaseAnalysis()
+    if (active === 'inventory_date')   runInventoryDate()
   }
 
   return (
@@ -176,14 +201,42 @@ export default function ReportsModule() {
           {/* Filters — hidden for Statement (has its own), aging, and bad_debt (point-in-time) */}
           {active !== 'statement' && active !== 'ar_aging' && active !== 'ap_aging' && active !== 'bad_debt' && (
             <div style={{ display:'flex', gap:8, alignItems:'flex-end', marginBottom:14, flexWrap:'wrap' }}>
-              <div className="field">
-                <label>From Date</label>
-                <input type="date" value={from} onChange={e => setFrom(e.target.value)} style={{ width:140 }} />
-              </div>
-              <div className="field">
-                <label>To Date</label>
-                <input type="date" value={to} onChange={e => setTo(e.target.value)} style={{ width:140 }} />
-              </div>
+              {active === 'inventory_date' ? (
+                <div className="field">
+                  <label>As At Date</label>
+                  <input type="date" value={invDate} onChange={e => setInvDate(e.target.value)} style={{ width:140 }} />
+                </div>
+              ) : (
+                <>
+                  <div className="field">
+                    <label>From Date</label>
+                    <input type="date" value={from} onChange={e => setFrom(e.target.value)} style={{ width:140 }} />
+                  </div>
+                  <div className="field">
+                    <label>To Date</label>
+                    <input type="date" value={to} onChange={e => setTo(e.target.value)} style={{ width:140 }} />
+                  </div>
+                </>
+              )}
+              {active === 'sales_product' && (
+                <div className="field">
+                  <label>Sort By</label>
+                  <select value={spSortBy} onChange={e => setSpSortBy(e.target.value)} style={{ width:120 }}>
+                    <option value="revenue">Revenue</option>
+                    <option value="qty">Qty Sold</option>
+                    <option value="profit">Profit</option>
+                  </select>
+                </div>
+              )}
+              {active === 'purchase_analysis' && (
+                <div className="field">
+                  <label>Group By</label>
+                  <select value={paMode} onChange={e => setPaMode(e.target.value)} style={{ width:130 }}>
+                    <option value="supplier">Supplier</option>
+                    <option value="category">Category</option>
+                  </select>
+                </div>
+              )}
               <button className="btn primary" onClick={handleRun}>▶ Run Report</button>
               <button className="btn" onClick={() => printReport('report-content-area')}>🖨 Print</button>
               <button className="btn" onClick={() => exportCsv(active, { vatData, plData, bsData, overdueData, stockData })}>📤 Export CSV</button>
@@ -200,8 +253,11 @@ export default function ReportsModule() {
           {active === 'ap_aging' && <AgingReport  data={apAgingData} type="ap" onRun={runApAging} />}
           {active === 'stock'    && <StockReport   data={stockData} />}
           {active === 'lowstock' && <StockReport   data={stockData} lowOnly />}
-          {active === 'bad_debt' && <BadDebtReport data={badDebtData} loading={bdLoading} onRun={runBadDebt} />}
-          {!['vat','pl','bs','overdue','ar_aging','ap_aging','stock','lowstock','statement','bad_debt'].includes(active) && (
+          {active === 'bad_debt'          && <BadDebtReport data={badDebtData} loading={bdLoading} onRun={runBadDebt} />}
+          {active === 'sales_product'     && <SalesProductReport data={salesProductData} loading={spLoading} sortBy={spSortBy} from={from} to={to} />}
+          {active === 'purchase_analysis' && <PurchaseAnalysisReport data={purchaseAnalysisData} loading={paLoading} mode={paMode} from={from} to={to} />}
+          {active === 'inventory_date'    && <InventoryAtDateReport data={inventoryDateData} loading={idLoading} asAt={invDate} />}
+          {!['vat','pl','bs','overdue','ar_aging','ap_aging','stock','lowstock','statement','bad_debt','sales_product','purchase_analysis','inventory_date'].includes(active) && (
             <div className="empty-state">
               <div className="icon">📊</div>
               <div>Select date range and click Run to generate this report</div>
@@ -825,6 +881,247 @@ function BadDebtReport({ data, loading, onRun }) {
       )}
 
       {getModal('invoice')?.open && <InvoiceModal />}
+    </div>
+  )
+}
+
+// ── Sales by Product ───────────────────────────────────────
+function SalesProductReport({ data, loading, sortBy, from, to }) {
+  if (loading) return <div style={{ padding:40, textAlign:'center', color:'#888' }}>Loading…</div>
+  if (!data) return (
+    <div className="empty-state">
+      <div className="icon">🏆</div>
+      <div>Click Run to view sales by product</div>
+    </div>
+  )
+  const totalRevenue = data.reduce((s, r) => s + parseFloat(r.revenue || 0), 0)
+  const totalProfit  = data.reduce((s, r) => s + parseFloat(r.profit  || 0), 0)
+  const totalQty     = data.reduce((s, r) => s + parseFloat(r.qty_sold || 0), 0)
+  const MEDALS = ['🥇','🥈','🥉']
+
+  return (
+    <div>
+      <div style={{ fontSize:13, fontWeight:700, marginBottom:12, paddingBottom:6, borderBottom:'1px solid #ddd' }}>
+        Sales by Product — {fmtDate(from)} to {fmtDate(to)}
+        <span style={{ fontSize:11, fontWeight:400, color:'#888', marginLeft:8 }}>sorted by {sortBy}</span>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10, marginBottom:14 }}>
+        <div style={{ background:'var(--blue-light)', border:'1px solid #b0c8f0', borderRadius:3, padding:'8px 14px' }}>
+          <div style={{ fontSize:11, color:'#555', marginBottom:3 }}>Total Revenue</div>
+          <div style={{ fontSize:18, fontWeight:700, color:'var(--blue)' }}>BHD {fmtBhd(totalRevenue)}</div>
+        </div>
+        <div style={{ background:'var(--green-light)', border:'1px solid #a5d6a7', borderRadius:3, padding:'8px 14px' }}>
+          <div style={{ fontSize:11, color:'#555', marginBottom:3 }}>Total Profit</div>
+          <div style={{ fontSize:18, fontWeight:700, color:'var(--green)' }}>BHD {fmtBhd(totalProfit)}</div>
+        </div>
+        <div style={{ background:'#f8f8f8', border:'1px solid #ddd', borderRadius:3, padding:'8px 14px' }}>
+          <div style={{ fontSize:11, color:'#555', marginBottom:3 }}>Total Units Sold</div>
+          <div style={{ fontSize:18, fontWeight:700, color:'#333' }}>{parseFloat(totalQty).toLocaleString()}</div>
+        </div>
+      </div>
+      <table className="data-table" style={{ fontSize:12 }}>
+        <thead>
+          <tr>
+            <th style={{ width:32 }}>#</th>
+            <th>Product</th>
+            <th>SKU</th>
+            <th>Category</th>
+            <th className="right">Qty Sold</th>
+            <th className="right">Revenue BHD</th>
+            <th className="right">COGS BHD</th>
+            <th className="right">Profit BHD</th>
+            <th className="right">Margin %</th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.length === 0 && <tr className="empty-row"><td colSpan={9}>No sales in this period</td></tr>}
+          {data.map((r, i) => {
+            const margin = parseFloat(r.revenue) > 0
+              ? ((parseFloat(r.profit) / parseFloat(r.revenue)) * 100).toFixed(1)
+              : '0.0'
+            return (
+              <tr key={r.product_id}>
+                <td style={{ textAlign:'center', fontWeight:600, color:'#888' }}>
+                  {MEDALS[i] || (i + 1)}
+                </td>
+                <td style={{ fontWeight:600 }}>{r.product_name}</td>
+                <td style={{ color:'#888', fontFamily:'monospace' }}>{r.sku || '—'}</td>
+                <td>{r.category_name || '—'}</td>
+                <td className="right">{parseFloat(r.qty_sold).toLocaleString()}</td>
+                <td className="right" style={{ fontWeight:600, color:'var(--blue)' }}>BHD {fmtBhd(r.revenue)}</td>
+                <td className="right" style={{ color:'#888' }}>BHD {fmtBhd(r.cogs)}</td>
+                <td className="right" style={{ color: parseFloat(r.profit) >= 0 ? 'var(--green)' : 'var(--red)', fontWeight:600 }}>
+                  BHD {fmtBhd(r.profit)}
+                </td>
+                <td className="right" style={{ color: parseFloat(margin) >= 20 ? 'var(--green)' : parseFloat(margin) >= 10 ? 'var(--amber)' : 'var(--red)' }}>
+                  {margin}%
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+        <tfoot>
+          <tr style={{ fontWeight:700, background:'#f0f4ff', fontSize:12 }}>
+            <td colSpan={4} style={{ padding:'6px 8px' }}>Total ({data.length} products)</td>
+            <td className="right" style={{ padding:'6px 8px' }}>{parseFloat(totalQty).toLocaleString()}</td>
+            <td className="right" style={{ padding:'6px 8px' }}>BHD {fmtBhd(totalRevenue)}</td>
+            <td className="right" style={{ padding:'6px 8px' }}>BHD {fmtBhd(data.reduce((s,r)=>s+parseFloat(r.cogs||0),0))}</td>
+            <td className="right" style={{ padding:'6px 8px' }}>BHD {fmtBhd(totalProfit)}</td>
+            <td className="right" style={{ padding:'6px 8px' }}>
+              {totalRevenue > 0 ? ((totalProfit / totalRevenue) * 100).toFixed(1) : '0.0'}%
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  )
+}
+
+// ── Purchase Analysis ──────────────────────────────────────
+function PurchaseAnalysisReport({ data, loading, mode, from, to }) {
+  if (loading) return <div style={{ padding:40, textAlign:'center', color:'#888' }}>Loading…</div>
+  if (!data) return (
+    <div className="empty-state">
+      <div className="icon">🛒</div>
+      <div>Click Run to view purchase analysis</div>
+    </div>
+  )
+  const totalAmt = data.reduce((s, r) => s + parseFloat(r.total_amount || 0), 0)
+  const labelKey = mode === 'supplier' ? 'supplier_name' : 'category_name'
+
+  return (
+    <div>
+      <div style={{ fontSize:13, fontWeight:700, marginBottom:12, paddingBottom:6, borderBottom:'1px solid #ddd' }}>
+        Purchase Analysis by {mode === 'supplier' ? 'Supplier' : 'Category'} — {fmtDate(from)} to {fmtDate(to)}
+      </div>
+      <div style={{ background:'var(--blue-light)', border:'1px solid #b0c8f0', borderRadius:3, padding:'8px 14px', marginBottom:14, display:'flex', justifyContent:'space-between' }}>
+        <span style={{ fontWeight:700, color:'var(--blue)' }}>Total Purchases</span>
+        <span style={{ fontWeight:700, color:'var(--blue)', fontSize:16 }}>BHD {fmtBhd(totalAmt)}</span>
+      </div>
+      <table className="data-table" style={{ fontSize:12 }}>
+        <thead>
+          <tr>
+            <th>{mode === 'supplier' ? 'Supplier' : 'Category'}</th>
+            <th className="right">Orders</th>
+            <th className="right">Total BHD</th>
+            <th className="right">% of Spend</th>
+            {mode === 'supplier' && <th className="right">Avg Order BHD</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {data.length === 0 && <tr className="empty-row"><td colSpan={mode==='supplier'?5:4}>No purchases in this period</td></tr>}
+          {data.map((r, i) => {
+            const pct = totalAmt > 0 ? ((parseFloat(r.total_amount) / totalAmt) * 100).toFixed(1) : '0.0'
+            return (
+              <tr key={i}>
+                <td style={{ fontWeight:600 }}>{r[labelKey] || '— Uncategorised —'}</td>
+                <td className="right">{r.order_count}</td>
+                <td className="right" style={{ fontWeight:600 }}>BHD {fmtBhd(r.total_amount)}</td>
+                <td className="right">
+                  <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:6 }}>
+                    <div style={{ width:60, height:6, background:'#eee', borderRadius:3, overflow:'hidden' }}>
+                      <div style={{ width:`${pct}%`, height:'100%', background:'var(--blue)', borderRadius:3 }} />
+                    </div>
+                    <span>{pct}%</span>
+                  </div>
+                </td>
+                {mode === 'supplier' && (
+                  <td className="right">BHD {fmtBhd(r.order_count > 0 ? parseFloat(r.total_amount) / parseFloat(r.order_count) : 0)}</td>
+                )}
+              </tr>
+            )
+          })}
+        </tbody>
+        <tfoot>
+          <tr style={{ fontWeight:700, background:'#f0f4ff', fontSize:12 }}>
+            <td style={{ padding:'6px 8px' }}>Total ({data.length} {mode === 'supplier' ? 'suppliers' : 'categories'})</td>
+            <td className="right" style={{ padding:'6px 8px' }}>{data.reduce((s,r)=>s+parseInt(r.order_count||0),0)}</td>
+            <td className="right" style={{ padding:'6px 8px' }}>BHD {fmtBhd(totalAmt)}</td>
+            <td colSpan={mode === 'supplier' ? 2 : 1}></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  )
+}
+
+// ── Inventory at Date ──────────────────────────────────────
+function InventoryAtDateReport({ data, loading, asAt }) {
+  const [catFilter, setCatFilter] = useState('')
+  if (loading) return <div style={{ padding:40, textAlign:'center', color:'#888' }}>Reconstructing inventory…</div>
+  if (!data) return (
+    <div className="empty-state">
+      <div className="icon">📅</div>
+      <div>Select a date and click Run to view historical inventory levels</div>
+    </div>
+  )
+  const cats = [...new Set(data.map(r => r.category_name).filter(Boolean))].sort()
+  const rows = catFilter ? data.filter(r => r.category_name === catFilter) : data
+  const totalValue = rows.reduce((s, r) => s + parseFloat(r.stock_value || 0), 0)
+
+  return (
+    <div>
+      <div style={{ fontSize:13, fontWeight:700, marginBottom:12, paddingBottom:6, borderBottom:'1px solid #ddd' }}>
+        Inventory at Date — {fmtDate(asAt)}
+        <span style={{ fontSize:11, fontWeight:400, color:'#888', marginLeft:8 }}>
+          (reconstructed from stock movements)
+        </span>
+      </div>
+      <div style={{ display:'flex', gap:10, alignItems:'flex-end', marginBottom:12, flexWrap:'wrap' }}>
+        <div style={{ background:'var(--blue-light)', border:'1px solid #b0c8f0', borderRadius:3, padding:'8px 14px', flex:1, minWidth:160 }}>
+          <div style={{ fontSize:11, color:'#555', marginBottom:3 }}>Total Value</div>
+          <div style={{ fontSize:18, fontWeight:700, color:'var(--blue)' }}>BHD {fmtBhd(totalValue)}</div>
+        </div>
+        <div style={{ background:'#f8f8f8', border:'1px solid #ddd', borderRadius:3, padding:'8px 14px', flex:1, minWidth:160 }}>
+          <div style={{ fontSize:11, color:'#555', marginBottom:3 }}>Total Products</div>
+          <div style={{ fontSize:18, fontWeight:700, color:'#333' }}>{rows.length}</div>
+        </div>
+        <div className="field" style={{ marginBottom:0 }}>
+          <label>Category</label>
+          <select value={catFilter} onChange={e => setCatFilter(e.target.value)} style={{ width:160 }}>
+            <option value="">All categories</option>
+            {cats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+      <table className="data-table" style={{ fontSize:12 }}>
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Product</th>
+            <th>Category</th>
+            <th className="right">Qty at Date</th>
+            <th className="right">Cost BHD</th>
+            <th className="right">Stock Value BHD</th>
+            <th>Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && <tr className="empty-row"><td colSpan={7}>No products</td></tr>}
+          {rows.map(r => (
+            <tr key={r.product_id}>
+              <td style={{ fontFamily:'monospace', color:'#888' }}>{r.sku || '—'}</td>
+              <td style={{ fontWeight:600 }}>{r.product_name}</td>
+              <td>{r.category_name || '—'}</td>
+              <td className="right" style={{ fontWeight:600, color: parseFloat(r.qty_at_date) <= 0 ? 'var(--red)' : undefined }}>
+                {parseFloat(r.qty_at_date).toLocaleString()}
+              </td>
+              <td className="right">BHD {fmtBhd(r.cost_price)}</td>
+              <td className="right" style={{ fontWeight:600 }}>BHD {fmtBhd(r.stock_value)}</td>
+              <td style={{ fontSize:11, color:'#888' }}>
+                {r.source === 'movements' ? '📊 Movements' : '📦 Current'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr style={{ fontWeight:700, background:'#f0f4ff', fontSize:12 }}>
+            <td colSpan={5} style={{ padding:'6px 8px' }}>Total ({rows.length} products)</td>
+            <td className="right" style={{ padding:'6px 8px' }}>BHD {fmtBhd(totalValue)}</td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   )
 }

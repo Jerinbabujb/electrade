@@ -116,10 +116,9 @@ exports.profitLoss = async (req, res, next) => {
     // COGS — calculated directly from cost_price × qty on invoiced lines
     // (stock_movements is not used as the importer populates via direct inserts)
     const { rows: [cogsRow] } = await db.query(
-      `SELECT COALESCE(SUM(ii.qty::numeric * COALESCE(p.cost_price, 0)::numeric), 0) AS value
+      `SELECT COALESCE(SUM(ii.qty::numeric * ii.unit_cost::numeric), 0) AS value
        FROM invoice_items ii
        JOIN invoices i ON i.id = ii.invoice_id
-       JOIN products p ON p.id = ii.product_id
        WHERE i.company_id = $1
          AND i.type = 'tax_invoice'
          AND i.payment_status != 'void'
@@ -744,5 +743,154 @@ exports.badDebtCandidates = async (req, res, next) => {
     for (const s of Object.values(segments)) s.balance = parseFloat(s.balance.toFixed(3));
 
     res.json({ data: rows, segments });
+  } catch (err) { next(err); }
+};
+
+// ── Sales by Product ─────────────────────────────────────────────────────────
+// ?from=&to=&category_id=
+exports.salesByProduct = async (req, res, next) => {
+  try {
+    const co   = req.user.company_id;
+    const from = req.query.from || `${new Date().getFullYear()}-01-01`;
+    const to   = req.query.to   || new Date().toISOString().slice(0, 10);
+
+    const params    = [co, from, to];
+    const catFilter = req.query.category_id
+      ? `AND p.category_id = $${params.push(req.query.category_id)}`
+      : '';
+
+    const { rows } = await db.query(`
+      SELECT
+        p.id           AS product_id,
+        p.sku,
+        p.name         AS product_name,
+        COALESCE(cat.name, 'Uncategorised') AS category,
+        COUNT(DISTINCT i.id)::int           AS invoice_count,
+        ROUND(SUM(ii.qty::numeric), 3)      AS qty_sold,
+        ROUND(SUM(ii.net_amount::numeric), 3) AS net_revenue,
+        ROUND(SUM(ii.qty::numeric * ii.unit_cost::numeric), 3) AS total_cogs,
+        ROUND(SUM(ii.net_amount::numeric)
+              - SUM(ii.qty::numeric * ii.unit_cost::numeric), 3) AS gross_profit,
+        ROUND(
+          CASE WHEN SUM(ii.net_amount::numeric) > 0
+            THEN (SUM(ii.net_amount::numeric)
+                  - SUM(ii.qty::numeric * ii.unit_cost::numeric))
+                 / SUM(ii.net_amount::numeric) * 100
+            ELSE 0
+          END, 1)      AS margin_pct
+      FROM invoice_items ii
+      JOIN invoices  i   ON ii.invoice_id = i.id
+      JOIN products  p   ON ii.product_id = p.id
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      WHERE i.company_id     = $1
+        AND i.type           = 'tax_invoice'
+        AND i.payment_status != 'void'
+        AND i.invoice_date BETWEEN $2 AND $3
+        ${catFilter}
+      GROUP BY p.id, p.sku, p.name, cat.name
+      ORDER BY net_revenue DESC
+      LIMIT 500
+    `, params);
+
+    const totals = rows.reduce((a, r) => {
+      a.net_revenue  += +r.net_revenue;
+      a.total_cogs   += +r.total_cogs;
+      a.gross_profit += +r.gross_profit;
+      return a;
+    }, { net_revenue: 0, total_cogs: 0, gross_profit: 0 });
+    totals.margin_pct = totals.net_revenue > 0
+      ? +((totals.gross_profit / totals.net_revenue) * 100).toFixed(1)
+      : 0;
+
+    res.json({ data: rows, totals, from, to });
+  } catch (err) { next(err); }
+};
+
+// ── Purchase Analysis ────────────────────────────────────────────────────────
+// ?from=&to=&group_by=supplier|category
+exports.purchaseAnalysis = async (req, res, next) => {
+  try {
+    const co      = req.user.company_id;
+    const from    = req.query.from    || `${new Date().getFullYear()}-01-01`;
+    const to      = req.query.to      || new Date().toISOString().slice(0, 10);
+    const groupBy = req.query.group_by === 'category' ? 'category' : 'supplier';
+
+    const { rows } = await db.query(groupBy === 'supplier' ? `
+      SELECT
+        s.id            AS supplier_id,
+        s.code          AS supplier_code,
+        s.name          AS supplier_name,
+        COUNT(DISTINCT pur.id)::int          AS purchase_count,
+        ROUND(SUM(pi.qty::numeric), 3)       AS total_qty,
+        ROUND(SUM(pi.qty::numeric * pi.unit_price::numeric), 3) AS total_value,
+        MAX(pur.purchase_date)               AS last_purchase
+      FROM purchase_items pi
+      JOIN purchases pur ON pur.id = pi.purchase_id
+      JOIN customers  s  ON s.id  = pur.supplier_id
+      WHERE pur.company_id   = $1
+        AND pur.purchase_date BETWEEN $2 AND $3
+      GROUP BY s.id, s.code, s.name
+      ORDER BY total_value DESC
+      LIMIT 200
+    ` : `
+      SELECT
+        COALESCE(cat.name, 'Uncategorised') AS category,
+        COUNT(DISTINCT pur.id)::int          AS purchase_count,
+        ROUND(SUM(pi.qty::numeric), 3)       AS total_qty,
+        ROUND(SUM(pi.qty::numeric * pi.unit_price::numeric), 3) AS total_value
+      FROM purchase_items pi
+      JOIN purchases   pur ON pur.id    = pi.purchase_id
+      JOIN products    p   ON p.id      = pi.product_id
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      WHERE pur.company_id   = $1
+        AND pur.purchase_date BETWEEN $2 AND $3
+      GROUP BY cat.name
+      ORDER BY total_value DESC
+    `, [co, from, to]);
+
+    const total_value = rows.reduce((s, r) => s + +r.total_value, 0);
+    res.json({ data: rows, total_value: +total_value.toFixed(3), from, to, group_by: groupBy });
+  } catch (err) { next(err); }
+};
+
+// ── Inventory Valuation at Date ──────────────────────────────────────────────
+// ?at_date=YYYY-MM-DD  (defaults to today)
+exports.inventoryAtDate = async (req, res, next) => {
+  try {
+    const co      = req.user.company_id;
+    const at_date = req.query.at_date || new Date().toISOString().slice(0, 10);
+
+    const { rows } = await db.query(`
+      WITH movements AS (
+        -- All stock-affecting events up to at_date
+        SELECT product_id,
+               SUM(CASE WHEN type IN ('purchase','adjustment_in','opening')
+                        THEN qty::numeric ELSE 0 END)
+             - SUM(CASE WHEN type IN ('sale','adjustment_out','write_off')
+                        THEN qty::numeric ELSE 0 END) AS net_qty
+        FROM stock_movements
+        WHERE company_id = $1
+          AND moved_at::date <= $2
+        GROUP BY product_id
+      )
+      SELECT
+        p.id, p.sku, p.name,
+        COALESCE(cat.name, 'Uncategorised')  AS category,
+        COALESCE(m.net_qty, p.stock_qty::numeric) AS qty_at_date,
+        p.cost_price::numeric               AS unit_cost,
+        ROUND(
+          COALESCE(m.net_qty, p.stock_qty::numeric)
+          * p.cost_price::numeric, 3)        AS stock_value
+      FROM products p
+      LEFT JOIN movements m ON m.product_id = p.id
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      WHERE p.company_id     = $1
+        AND p.is_active       = TRUE
+        AND p.is_stock_tracked = TRUE
+      ORDER BY stock_value DESC
+    `, [co, at_date]);
+
+    const total_value = rows.reduce((s, r) => s + +r.stock_value, 0);
+    res.json({ data: rows, total_value: +total_value.toFixed(3), at_date });
   } catch (err) { next(err); }
 };

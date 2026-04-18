@@ -2,6 +2,7 @@ const db   = require('../db');
 const pdfSvc = require('../services/pdfService');
 const emailSvc = require('../services/emailService');
 const { v4: uuid } = require('uuid');
+const audit = require('../utils/auditLog');
 
 // ── Build shared WHERE clause for invoice filters ─────────
 function buildInvoiceWhere(query, companyId) {
@@ -173,8 +174,9 @@ exports.create = async (req, res, next) => {
         const it = items[i];
         await client.query(
           `INSERT INTO invoice_items (id, invoice_id, product_id, line_no, part_no, description,
-             qty, unit, unit_price, discount, vat_rate)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+             qty, unit, unit_price, discount, vat_rate, unit_cost)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             COALESCE((SELECT cost_price FROM products WHERE id=$3), 0))`,
           [uuid(), inv.id, it.product_id||null, i+1, it.part_no, it.description,
            it.qty, it.unit, it.unit_price, it.discount||0, it.vat_rate||10]);
       }
@@ -240,8 +242,9 @@ exports.createFromDNs = async (req, res, next) => {
       for (let i = 0; i < allItems.length; i++) {
         const it = allItems[i];
         await client.query(
-          `INSERT INTO invoice_items (id, invoice_id, product_id, line_no, part_no, description, qty, unit, unit_price, discount, vat_rate)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          `INSERT INTO invoice_items (id, invoice_id, product_id, line_no, part_no, description, qty, unit, unit_price, discount, vat_rate, unit_cost)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             COALESCE((SELECT cost_price FROM products WHERE id=$3), 0))`,
           [uuid(), inv.id, it.product_id||null, i+1, it.part_no, it.description,
            it.qty, it.unit, it.unit_price, 0, it.vat_rate]);
       }
@@ -365,6 +368,7 @@ exports.void = async (req, res, next) => {
       `UPDATE invoices SET payment_status = 'void', updated_at = now()
        WHERE id = $1 AND company_id = $2 RETURNING invoice_no`, [req.params.id, req.user.company_id]);
     if (!inv) return res.status(404).json({ error: { message: 'Invoice not found' } });
+    await audit.log(db, req, 'invoice.void', 'invoice', req.params.id, inv.invoice_no);
     res.json({ message: `Invoice ${inv.invoice_no} voided` });
   } catch (err) { next(err); }
 };
@@ -421,8 +425,9 @@ exports.update = async (req, res, next) => {
         const it = items[i];
         await client.query(
           `INSERT INTO invoice_items (id, invoice_id, product_id, line_no, part_no, description,
-             qty, unit, unit_price, discount, vat_rate)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+             qty, unit, unit_price, discount, vat_rate, unit_cost)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             COALESCE((SELECT cost_price FROM products WHERE id=$3), 0))`,
           [uuid(), req.params.id, it.product_id||null, i+1, it.part_no, it.description,
            Number(it.qty), it.unit, Number(it.unit_price), Number(it.discount||0), Number(it.vat_rate||10)]);
       }
@@ -449,6 +454,8 @@ exports.addPayment = async (req, res, next) => {
        VALUES ($1,$2,'invoice',$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
       [uuid(), req.user.company_id, req.params.id, payment_date || new Date(),
        amount, method || 'bank_transfer', ref, notes, req.user.id]);
+    await audit.log(db, req, 'invoice.payment_added', 'invoice', req.params.id, null,
+      null, { amount, method: method || 'bank_transfer', payment_date });
     res.status(201).json({ data: pay, message: 'Payment recorded' });
   } catch (err) { next(err); }
 };
@@ -566,5 +573,82 @@ exports.sendEmail = async (req, res, next) => {
     if (!inv) return res.status(404).json({ error: { message: 'Invoice not found' } });
     await emailSvc.sendInvoice(inv, req.body.to || inv.customer_email);
     res.json({ message: `Invoice emailed to ${req.body.to || inv.customer_email}` });
+  } catch (err) { next(err); }
+};
+
+
+// ── Clone invoice — creates a draft copy with a new invoice_no ─────────────
+exports.clone = async (req, res, next) => {
+  try {
+    const { rows: [src] } = await db.query(
+      `SELECT i.*, array_agg(
+         json_build_object(
+           'product_id',  ii.product_id,
+           'line_no',     ii.line_no,
+           'part_no',     ii.part_no,
+           'description', ii.description,
+           'qty',         ii.qty,
+           'unit',        ii.unit,
+           'unit_price',  ii.unit_price,
+           'discount',    ii.discount,
+           'vat_rate',    ii.vat_rate
+         ) ORDER BY ii.line_no
+       ) AS items
+       FROM invoices i
+       LEFT JOIN invoice_items ii ON ii.invoice_id = i.id
+       WHERE i.id = $1 AND i.company_id = $2
+       GROUP BY i.id`,
+      [req.params.id, req.user.company_id]);
+    if (!src) return res.status(404).json({ error: { message: 'Invoice not found' } });
+
+    const type    = src.type;
+    const isDraft = ['quotation','proforma'].includes(type);
+    const seqCol  = type === 'quotation' ? 'next_quotation_seq'
+                  : type === 'proforma'  ? 'next_proforma_seq'
+                  :                        'next_invoice_seq';
+    const prefCol = type === 'quotation' ? 'quotation_prefix'
+                  : type === 'proforma'  ? 'proforma_prefix'
+                  :                        'invoice_prefix';
+
+    const result = await db.withTransaction(async (client) => {
+      const { rows: [co] } = await client.query(
+        `UPDATE companies SET ${seqCol} = ${seqCol} + 1
+         WHERE id = $1 RETURNING ${prefCol} AS prefix, ${seqCol} - 1 AS seq`,
+        [req.user.company_id]);
+      const invoice_no = `${co.prefix}-${new Date().getFullYear()}-${String(co.seq).padStart(4,'0')}`;
+
+      const { rows: [inv] } = await client.query(
+        `INSERT INTO invoices
+           (id, company_id, invoice_no, type, customer_id,
+            invoice_date, due_date, po_reference,
+            subtotal, total_discount, total_vat, shipping, grand_total,
+            notes, internal_notes, valid_until, payment_status, created_by)
+         VALUES ($1,$2,$3,$4,$5,CURRENT_DATE,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         RETURNING *`,
+        [uuid(), req.user.company_id, invoice_no, type, src.customer_id,
+         src.due_date, src.po_reference,
+         src.subtotal, src.total_discount, src.total_vat, src.shipping, src.grand_total,
+         src.notes, src.internal_notes, src.valid_until,
+         isDraft ? 'draft' : 'draft',
+         req.user.id]);
+
+      const items = src.items.filter(Boolean);
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        await client.query(
+          `INSERT INTO invoice_items
+             (id, invoice_id, product_id, line_no, part_no, description,
+              qty, unit, unit_price, discount, vat_rate, unit_cost)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+             COALESCE((SELECT cost_price FROM products WHERE id=$3), 0))`,
+          [uuid(), inv.id, it.product_id||null, i+1, it.part_no, it.description,
+           it.qty, it.unit, it.unit_price, it.discount||0, it.vat_rate||10]);
+      }
+      return inv;
+    });
+
+    await audit.log(db, req, 'invoice.cloned', 'invoice', result.id, result.invoice_no,
+      { source_id: req.params.id });
+    res.status(201).json({ data: result, message: `Cloned as draft ${result.invoice_no}` });
   } catch (err) { next(err); }
 };
