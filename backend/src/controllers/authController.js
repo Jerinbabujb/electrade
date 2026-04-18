@@ -112,9 +112,12 @@ exports.switchCompany = async (req, res, next) => {
 exports.me = async (req, res, next) => {
   try {
     const { rows: [user] } = await db.query(
-      `SELECT u.id, u.name, u.email, u.company_id,
-              c.name AS company_name, c.cr_number, c.vat_number
-       FROM users u JOIN companies c ON c.id = $2
+      `SELECT u.id, u.name, u.email,
+              $2::uuid             AS company_id,
+              c.name               AS company_name,
+              c.cr_number, c.vat_number
+       FROM users u
+       JOIN companies c ON c.id = $2
        WHERE u.id = $1`,
       [req.user.id, req.user.company_id])
     res.json({ data: { ...user, role: req.user.role } })
