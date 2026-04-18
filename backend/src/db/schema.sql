@@ -69,6 +69,21 @@ CREATE TABLE users (
 CREATE INDEX idx_users_company ON users(company_id);
 
 -- ============================================================
+-- USER_COMPANIES  (junction: one user can access many companies)
+-- ============================================================
+CREATE TABLE user_companies (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  role        user_role NOT NULL DEFAULT 'sales',
+  is_default  BOOLEAN NOT NULL DEFAULT false,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(user_id, company_id)
+);
+CREATE INDEX idx_user_companies_user    ON user_companies(user_id);
+CREATE INDEX idx_user_companies_company ON user_companies(company_id);
+
+-- ============================================================
 -- CATEGORIES
 -- ============================================================
 CREATE TABLE categories (

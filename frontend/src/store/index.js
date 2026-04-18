@@ -1,20 +1,37 @@
 import { create } from 'zustand'
+import { authApi } from '../services/api'
 
 // ── Auth store ─────────────────────────────────
 export const useAuthStore = create((set) => ({
-  user:    JSON.parse(localStorage.getItem('et_user') || 'null'),
-  token:   localStorage.getItem('et_token') || null,
-  isAuth:  !!localStorage.getItem('et_token'),
+  user:       JSON.parse(localStorage.getItem('et_user') || 'null'),
+  token:      localStorage.getItem('et_token') || null,
+  isAuth:     !!localStorage.getItem('et_token'),
+  switching:  false,
 
   login: (user, token) => {
     localStorage.setItem('et_token', token)
     localStorage.setItem('et_user', JSON.stringify(user))
     set({ user, token, isAuth: true })
   },
+
   logout: () => {
     localStorage.removeItem('et_token')
     localStorage.removeItem('et_user')
     set({ user: null, token: null, isAuth: false })
+  },
+
+  switchCompany: async (companyId, queryClient) => {
+    set({ switching: true })
+    try {
+      const { data } = await authApi.switchCompany(companyId)
+      localStorage.setItem('et_token', data.token)
+      localStorage.setItem('et_user', JSON.stringify(data.user))
+      set({ user: data.user, token: data.token, switching: false })
+      // Flush all cached data so the new company's data loads fresh
+      if (queryClient) queryClient.clear()
+    } catch {
+      set({ switching: false })
+    }
   },
 }))
 

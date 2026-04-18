@@ -282,12 +282,13 @@ export const analyticsApi = {
 
 // ── Auth ───────────────────────────────────────
 export const authApi = {
-  login:       (data)        => api.post('/auth/login', data),
-  me:          ()            => api.get('/auth/me'),
-  logout:      ()            => { localStorage.removeItem('et_token'); localStorage.removeItem('et_user') },
-  listUsers:   ()            => api.get('/auth/users'),
-  createUser:  (data)        => api.post('/auth/users', data),
-  updateUser:  (id, data)    => api.put(`/auth/users/${id}`, data),
+  login:         (data)        => api.post('/auth/login', data),
+  switchCompany: (company_id)  => api.post('/auth/switch-company', { company_id }),
+  me:            ()            => api.get('/auth/me'),
+  logout:        ()            => { localStorage.removeItem('et_token'); localStorage.removeItem('et_user') },
+  listUsers:     ()            => api.get('/auth/users'),
+  createUser:    (data)        => api.post('/auth/users', data),
+  updateUser:    (id, data)    => api.put(`/auth/users/${id}`, data),
 }
 
 export default api

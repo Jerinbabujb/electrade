@@ -1,5 +1,5 @@
 import { useUIStore, useAuthStore } from '../../store'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import api from '../../services/api'
 import { Toaster } from 'react-hot-toast'
@@ -83,10 +83,14 @@ const MODULES = {
 }
 
 export default function AppShell() {
-  const { activeModule, setModule } = useUIStore()
-  const { user, logout }            = useAuthStore()
-  const { data: coData }            = useQuery({ queryKey: ['company-settings'], queryFn: () => api.get('/companies').then(r => r.data.data) })
+  const { activeModule, setModule }           = useUIStore()
+  const { user, logout, switchCompany, switching } = useAuthStore()
+  const queryClient                           = useQueryClient()
+  const { data: coData }                      = useQuery({ queryKey: ['company-settings'], queryFn: () => api.get('/companies').then(r => r.data.data) })
   const co = coData || {}
+
+  const companies = user?.companies || []
+  const multiCompany = companies.length > 1
 
   useEffect(() => {
     if (coData?.theme_color) applyTheme(coData.theme_color)
@@ -111,8 +115,25 @@ export default function AppShell() {
           &nbsp;|&nbsp; VAT: {co.vat_number || 'BH-VAT-20241234'}
           &nbsp;|&nbsp; CR: {co.cr_number || '98765-1'}
         </span>
-        <span style={{ marginLeft: 'auto', color: '#cce0ff', fontSize: 11 }}>
-          {user?.name} ({user?.role}) &nbsp;
+        <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {multiCompany && (
+            <select
+              disabled={switching}
+              value={user?.company_id || ''}
+              onChange={e => switchCompany(e.target.value, queryClient)}
+              style={{
+                fontSize: 10, padding: '1px 4px', borderRadius: 2, border: '1px solid #cce0ff',
+                background: '#1a4a8a', color: '#fff', cursor: 'pointer', maxWidth: 160,
+              }}
+            >
+              {companies.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
+          <span style={{ color: '#cce0ff', fontSize: 11 }}>
+            {user?.name} ({user?.role})
+          </span>
           <button onClick={logout} style={{
             background: 'none', border: '1px solid #cce0ff', color: '#cce0ff',
             fontSize: 10, padding: '1px 6px', borderRadius: 2, cursor: 'pointer',
