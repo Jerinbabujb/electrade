@@ -1055,8 +1055,14 @@ async function buildDailyClosingData(co_id, date) {
     db.query(`SELECT cheque_no,bank_name,party_name,amount,status FROM cheques
       WHERE company_id=$1 AND cheque_date=$2 AND direction='received' ORDER BY created_at`, [co_id, date]),
 
-    db.query(`SELECT dn_no,customer_name,project_ref,net_value,status FROM delivery_notes
-      WHERE company_id=$1 AND dn_date=$2 ORDER BY created_at`, [co_id, date]),
+    db.query(`
+      SELECT dn.dn_no, c.name AS customer_name, dn.project_ref, dn.status,
+             COALESCE((SELECT SUM(dni.qty_delivered * dni.unit_price)
+                       FROM delivery_note_items dni WHERE dni.dn_id = dn.id), 0) AS net_value
+      FROM delivery_notes dn
+      JOIN customers c ON c.id = dn.customer_id
+      WHERE dn.company_id=$1 AND dn.dn_date=$2
+      ORDER BY dn.created_at`, [co_id, date]),
 
     db.query(`SELECT COALESCE(SUM(balance_due),0) AS outstanding FROM invoices
       WHERE company_id=$1 AND type='tax_invoice'
