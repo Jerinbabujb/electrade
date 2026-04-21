@@ -186,7 +186,7 @@ export default function DNModule() {
   const { data: hResp, isLoading: hLoading } = useQuery({
     queryKey: ['si-historical-dns', hFilters, hPage, hPageSize],
     queryFn:  () => invoiceApi.list({
-      type: 'quotation', q: hFilters.q, from: hFilters.from, to: hFilters.to,
+      type: 'delivery_note', q: hFilters.q, from: hFilters.from, to: hFilters.to,
       limit: hPageSize, offset: hOffset,
     }).then(r => r.data),
     keepPreviousData: true,
@@ -240,7 +240,7 @@ export default function DNModule() {
       <div style={{ display:'flex', gap:0, padding:'0 12px', borderBottom:'2px solid #e0e0e0', flexShrink:0, background:'#fafafa' }}>
         {[
           { key:'native',     label:'Active Delivery Notes' },
-          { key:'historical', label:`SI Historical DNs (${hTotal > 0 ? hTotal.toLocaleString() : '3,008'})` },
+          { key:'historical', label:`SI Historical DNs (${hTotal > 0 ? hTotal.toLocaleString() : '3,023'})` },
         ].map(tab => (
           <button key={tab.key} onClick={() => setActiveTab(tab.key)}
             style={{

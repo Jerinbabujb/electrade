@@ -10,7 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 -- Enums
 CREATE TYPE user_role        AS ENUM ('admin','sales','storekeeper','accountant');
 CREATE TYPE customer_type    AS ENUM ('retail','wholesale','contractor','government','supplier');
-CREATE TYPE invoice_type     AS ENUM ('tax_invoice','quotation','proforma','credit_note','receipt');
+CREATE TYPE invoice_type     AS ENUM ('tax_invoice','quotation','proforma','credit_note','receipt','delivery_note');
 CREATE TYPE invoice_status   AS ENUM ('draft','unpaid','partial','paid','overdue','void');
 CREATE TYPE dn_status        AS ENUM ('pending_invoice','invoiced','cancelled');
 CREATE TYPE movement_type    AS ENUM ('purchase_in','dn_out','dn_reversal','invoice_out','return_in','adjustment','opening');

@@ -31,8 +31,8 @@ router.use(authorize('admin'))
 const SALE_TYPE_MAP = {
   '1': 'tax_invoice',
   '2': 'credit_note',
-  '3': 'quotation',
-  '4': 'proforma',
+  '3': 'delivery_note', // SI "Quotation" type — repurposed by this company as Delivery Note (DN/YYYY/N)
+  '4': 'quotation',     // SI "Proforma Invoice" type — repurposed by this company as Quotation (QT/YYYY/N)
   '5': 'receipt',
 }
 
