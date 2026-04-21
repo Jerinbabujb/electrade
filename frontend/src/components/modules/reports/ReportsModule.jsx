@@ -4,6 +4,7 @@ import { reportApi, invoiceApi } from '../../../services/api'
 import { useUIStore, useAuthStore } from '../../../store'
 import { fmtBhd, fmtDate } from '../../../utils/format'
 import StatementOfAccounts from './StatementOfAccounts'
+import DailyClosingReport  from './DailyClosingReport'
 import InvoiceModal from '../invoices/InvoiceModal'
 import toast from 'react-hot-toast'
 
@@ -32,6 +33,8 @@ const REPORT_NAV = [
   { id: 'stock',        label: 'Stock Valuation' },
   { id: 'lowstock',     label: 'Low Stock Alert' },
   { id: 'inventory_date', label: 'Inventory at Date' },
+  { section: 'Operations' },
+  { id: 'daily_closing', label: '🏪 Daily Closing Report' },
 ]
 
 // ── Print helper ───────────────────────────────────────────
@@ -244,7 +247,8 @@ export default function ReportsModule() {
           )}
 
           <div id="report-content-area">
-          {active === 'statement' && <StatementOfAccounts />}
+          {active === 'statement'     && <StatementOfAccounts />}
+          {active === 'daily_closing' && <DailyClosingReport />}
           {active === 'vat'      && <VatReport    data={vatData}    from={from} to={to} />}
           {active === 'pl'       && <PLReport     data={plData}     from={from} to={to} />}
           {active === 'bs'       && <BSReport     data={bsData}     asAt={to} />}

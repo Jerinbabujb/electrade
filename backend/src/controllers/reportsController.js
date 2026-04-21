@@ -1019,3 +1019,168 @@ exports.inventoryAtDate = async (req, res, next) => {
     res.json({ data: rows, total_value: +total_value.toFixed(3), at_date });
   } catch (err) { next(err); }
 };
+
+// ── Daily Closing Report ──────────────────────────────────────────────────────
+async function buildDailyClosingData(co_id, date) {
+  const [invoicesRes, collectionsRes, expensesRes,
+         chqIssuedRes, chqReceivedRes, dnsRes, arRes] = await Promise.all([
+
+    db.query(`
+      SELECT i.invoice_no, i.type, c.name AS customer_name,
+             i.subtotal, i.total_vat, i.grand_total, i.payment_status
+      FROM invoices i JOIN customers c ON c.id=i.customer_id
+      WHERE i.company_id=$1 AND i.invoice_date=$2
+        AND i.type IN ('tax_invoice','credit_note')
+      ORDER BY i.created_at`, [co_id, date]),
+
+    db.query(`
+      SELECT p.amount, p.method, p.reference_no,
+             i.invoice_no, c.name AS customer_name
+      FROM payments p
+      JOIN invoices i ON i.id=p.reference_id
+      JOIN customers c ON c.id=i.customer_id
+      WHERE p.company_id=$1 AND p.payment_date=$2 AND p.reference_type='invoice'
+      ORDER BY p.created_at`, [co_id, date]),
+
+    db.query(`
+      SELECT e.expense_no, e.description, cat.name AS category_name,
+             e.net_amount, e.vat_amount, e.total_amount
+      FROM expenses e LEFT JOIN categories cat ON cat.id=e.category_id
+      WHERE e.company_id=$1 AND e.expense_date=$2
+      ORDER BY e.created_at`, [co_id, date]),
+
+    db.query(`SELECT cheque_no,bank_name,party_name,amount,status FROM cheques
+      WHERE company_id=$1 AND cheque_date=$2 AND direction='issued' ORDER BY created_at`, [co_id, date]),
+
+    db.query(`SELECT cheque_no,bank_name,party_name,amount,status FROM cheques
+      WHERE company_id=$1 AND cheque_date=$2 AND direction='received' ORDER BY created_at`, [co_id, date]),
+
+    db.query(`SELECT dn_no,customer_name,project_ref,net_value,status FROM delivery_notes
+      WHERE company_id=$1 AND dn_date=$2 ORDER BY created_at`, [co_id, date]),
+
+    db.query(`SELECT COALESCE(SUM(balance_due),0) AS outstanding FROM invoices
+      WHERE company_id=$1 AND type='tax_invoice'
+        AND payment_status IN ('unpaid','partial','overdue')`, [co_id]),
+  ]);
+
+  const invoices        = invoicesRes.rows;
+  const collections     = collectionsRes.rows;
+  const expenses        = expensesRes.rows;
+  const chequesIssued   = chqIssuedRes.rows;
+  const chequesReceived = chqReceivedRes.rows;
+  const dns             = dnsRes.rows;
+
+  const totalInvoiced   = invoices.filter(r=>r.type==='tax_invoice').reduce((s,r)=>s+parseFloat(r.grand_total),0);
+  const totalCollected  = collections.reduce((s,r)=>s+parseFloat(r.amount),0);
+  const totalExpenses   = expenses.reduce((s,r)=>s+parseFloat(r.total_amount),0);
+  const totalChqIssued  = chequesIssued.reduce((s,r)=>s+parseFloat(r.amount),0);
+  const totalChqRecvd   = chequesReceived.reduce((s,r)=>s+parseFloat(r.amount),0);
+
+  const byMethod = {};
+  for (const p of collections) byMethod[p.method] = (byMethod[p.method]||0) + parseFloat(p.amount);
+
+  return {
+    date, invoices, collections, expenses, chequesIssued, chequesReceived, dns,
+    summary: {
+      total_invoiced:          +totalInvoiced.toFixed(3),
+      total_credit_notes:      +invoices.filter(r=>r.type==='credit_note').reduce((s,r)=>s+parseFloat(r.grand_total),0).toFixed(3),
+      total_collected:         +totalCollected.toFixed(3),
+      total_expenses:          +totalExpenses.toFixed(3),
+      cheques_issued:          +totalChqIssued.toFixed(3),
+      cheques_received:        +totalChqRecvd.toFixed(3),
+      net_cash_in:             +(totalCollected - totalExpenses).toFixed(3),
+      ar_outstanding:          +parseFloat(arRes.rows[0].outstanding).toFixed(3),
+      collections_by_method:   byMethod,
+    },
+  };
+}
+
+exports.dailyClosing = async (req, res, next) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const data = await buildDailyClosingData(req.user.company_id, date);
+    res.json({ data });
+  } catch (err) { next(err); }
+};
+
+exports.dailyClosingPrint = async (req, res, next) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const d    = await buildDailyClosingData(req.user.company_id, date);
+    const s    = d.summary;
+    const fmt  = (n) => parseFloat(n||0).toFixed(3);
+    const fmtD = (dt) => dt ? new Date(dt).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}) : '—';
+    const METHOD = { cash:'Cash', bank_transfer:'Bank Transfer', cheque:'Cheque', card:'Card', other:'Other' };
+
+    const tbl = (heads, rows, cols) => `
+      <table><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>
+      ${rows.length ? rows.map(r=>`<tr>${cols.map(c=>`<td class="${c.cls||''}">${c.fn(r)}</td>`).join('')}</tr>`).join('') :
+        `<tr><td colspan="${heads.length}" class="empty">No records</td></tr>`}
+      </tbody></table>`;
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Daily Closing — ${date}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;font-size:12px;color:#222;padding:20px}
+h1{font-size:18px;margin-bottom:2px}.sub{color:#666;font-size:11px;margin-bottom:16px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
+.card{border:1px solid #ddd;border-radius:5px;padding:10px 12px;background:#fafafa}
+.card-lbl{font-size:9px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.card-val{font-size:15px;font-weight:700;color:#1a3a6c}
+.green{color:#2e7d32}.red{color:#c62828}.orange{color:#e65100}
+.sec{margin-bottom:16px}
+.sec-title{font-size:12px;font-weight:700;color:#1a3a6c;border-bottom:2px solid #e0e0e0;padding-bottom:3px;margin-bottom:6px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{background:#f0f4fa;padding:4px 6px;text-align:left;font-weight:600;border:1px solid #ddd}
+td{padding:3px 6px;border:1px solid #eee}.right{text-align:right}
+.empty{text-align:center;color:#aaa;padding:8px}
+.footer{margin-top:16px;border-top:1px solid #ddd;padding-top:8px;font-size:10px;color:#aaa;display:flex;justify-content:space-between}
+</style></head><body>
+<h1>Daily Closing Report</h1>
+<div class="sub">${fmtD(date)} &nbsp;&middot;&nbsp; Generated: ${new Date().toLocaleString('en-GB')}</div>
+<div class="cards">
+  <div class="card"><div class="card-lbl">Invoiced Today</div><div class="card-val">BHD ${fmt(s.total_invoiced)}</div></div>
+  <div class="card"><div class="card-lbl">Collections</div><div class="card-val green">BHD ${fmt(s.total_collected)}</div></div>
+  <div class="card"><div class="card-lbl">Expenses</div><div class="card-val red">BHD ${fmt(s.total_expenses)}</div></div>
+  <div class="card"><div class="card-lbl">Net Cash In</div><div class="card-val ${parseFloat(s.net_cash_in)>=0?'green':'red'}">BHD ${fmt(s.net_cash_in)}</div></div>
+  <div class="card"><div class="card-lbl">AR Outstanding</div><div class="card-val orange">BHD ${fmt(s.ar_outstanding)}</div></div>
+  <div class="card"><div class="card-lbl">Cheques Issued</div><div class="card-val red">BHD ${fmt(s.cheques_issued)}</div></div>
+  <div class="card"><div class="card-lbl">Cheques Received</div><div class="card-val green">BHD ${fmt(s.cheques_received)}</div></div>
+  <div class="card"><div class="card-lbl">DNs Issued</div><div class="card-val">${d.dns.length}</div></div>
+</div>
+<div class="sec"><div class="sec-title">Invoices Raised (${d.invoices.length})</div>
+${tbl(['Invoice No.','Customer','Subtotal BHD','VAT BHD','Total BHD','Status'],d.invoices,[
+  {fn:r=>r.invoice_no},{fn:r=>r.customer_name},
+  {fn:r=>fmt(r.subtotal),cls:'right'},{fn:r=>fmt(r.total_vat),cls:'right'},
+  {fn:r=>fmt(r.grand_total),cls:'right'},{fn:r=>r.payment_status}])}</div>
+<div class="sec"><div class="sec-title">Collections (${d.collections.length} &middot; BHD ${fmt(s.total_collected)})</div>
+${tbl(['Invoice No.','Customer','Amount BHD','Method','Reference'],d.collections,[
+  {fn:r=>r.invoice_no},{fn:r=>r.customer_name},
+  {fn:r=>fmt(r.amount),cls:'right'},{fn:r=>METHOD[r.method]||r.method},{fn:r=>r.reference_no||'&mdash;'}])}
+${Object.keys(s.collections_by_method).length?`<div style="margin-top:6px;font-size:11px"><strong>By method:</strong> ${Object.entries(s.collections_by_method).map(([m,v])=>`${METHOD[m]||m}: <strong>BHD ${fmt(v)}</strong>`).join(' &middot; ')}</div>`:''}</div>
+<div class="sec"><div class="sec-title">Expenses (${d.expenses.length} &middot; BHD ${fmt(s.total_expenses)})</div>
+${tbl(['Expense No.','Category','Description','Net BHD','VAT BHD','Total BHD'],d.expenses,[
+  {fn:r=>r.expense_no},{fn:r=>r.category_name||'&mdash;'},{fn:r=>r.description},
+  {fn:r=>fmt(r.net_amount),cls:'right'},{fn:r=>fmt(r.vat_amount),cls:'right'},{fn:r=>fmt(r.total_amount),cls:'right'}])}</div>
+<div class="sec"><div class="sec-title">Delivery Notes Issued (${d.dns.length})</div>
+${tbl(['DN No.','Customer','Project / Ref','Net Value BHD','Status'],d.dns,[
+  {fn:r=>r.dn_no},{fn:r=>r.customer_name},{fn:r=>r.project_ref||'&mdash;'},
+  {fn:r=>fmt(r.net_value),cls:'right'},{fn:r=>r.status}])}</div>
+${(d.chequesIssued.length||d.chequesReceived.length)?`
+<div class="sec"><div class="sec-title">Cheques Due Today</div>
+${d.chequesIssued.length?`<div style="font-size:11px;font-weight:600;color:#c62828;margin-bottom:4px">&uarr; Issued &mdash; BHD ${fmt(s.cheques_issued)}</div>
+${tbl(['Cheque No.','Bank','Party','Amount BHD','Status'],d.chequesIssued,[
+  {fn:r=>r.cheque_no},{fn:r=>r.bank_name||'&mdash;'},{fn:r=>r.party_name||'&mdash;'},{fn:r=>fmt(r.amount),cls:'right'},{fn:r=>r.status}])}`:'' }
+${d.chequesReceived.length?`<div style="font-size:11px;font-weight:600;color:#2e7d32;margin:8px 0 4px">&darr; Received &mdash; BHD ${fmt(s.cheques_received)}</div>
+${tbl(['Cheque No.','Bank','Party','Amount BHD','Status'],d.chequesReceived,[
+  {fn:r=>r.cheque_no},{fn:r=>r.bank_name||'&mdash;'},{fn:r=>r.party_name||'&mdash;'},{fn:r=>fmt(r.amount),cls:'right'},{fn:r=>r.status}])}`:'' }
+</div>`:''}
+<div class="footer"><span>ElecTrade Pro &mdash; Daily Closing Report</span><span>Printed: ${new Date().toLocaleString('en-GB')}</span></div>
+<script>window.onload=()=>window.print()</script>
+</body></html>`;
+
+    res.setHeader('Content-Type','text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) { next(err); }
+};

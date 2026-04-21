@@ -22,5 +22,7 @@ router.get('/bad-debt',           ctrl.badDebtCandidates);
 router.get('/sales-by-product',   ctrl.salesByProduct);
 router.get('/purchase-analysis',  ctrl.purchaseAnalysis);
 router.get('/inventory-at-date',  ctrl.inventoryAtDate);
+router.get('/daily-closing',      ctrl.dailyClosing);
+router.get('/daily-closing/print',ctrl.dailyClosingPrint);
 
 module.exports = router;

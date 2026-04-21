@@ -8,7 +8,8 @@ const { runMigrations } = require('./db/migrate')
 
 const {
   customersRouter, productsRouter, categoriesRouter,
-  purchasesRouter, expensesRouter, bankRouter, companiesRouter
+  purchasesRouter, expensesRouter, bankRouter, companiesRouter,
+  recurringExpensesRouter
 } = require('./routes/allRoutes')
 
 const app = express()
@@ -35,6 +36,7 @@ app.use('/api/v1/invoices',          require('./routes/invoices'))
 app.use('/api/v1/delivery-notes',    require('./routes/deliveryNotes'))
 app.use('/api/v1/purchases',         purchasesRouter)
 app.use('/api/v1/expenses',          expensesRouter)
+app.use('/api/v1/recurring-expenses', recurringExpensesRouter)
 app.use('/api/v1/bank',              bankRouter)
 app.use('/api/v1/reports',           require('./routes/reports'))
 app.use('/api/v1/cheques',           require('./routes/cheques'))

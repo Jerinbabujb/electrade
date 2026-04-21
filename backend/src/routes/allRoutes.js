@@ -721,6 +721,157 @@ module.exports.expensesRouter = (() => {
   return r
 })()
 
+// ── Recurring expense templates ────────────────────────────
+module.exports.recurringExpensesRouter = (() => {
+  const r = Router()
+  r.use(authenticate)
+
+  // ── Helpers ────────────────────────────────────────────
+  function nextDueDate(frequency, dayOfMonth, fromDate) {
+    const d = fromDate ? new Date(fromDate) : new Date()
+    const dom = Math.min(dayOfMonth || 1, 28)
+    switch (frequency) {
+      case 'weekly': {
+        const n = new Date(d)
+        n.setDate(n.getDate() + 7)
+        return n.toISOString().split('T')[0]
+      }
+      case 'monthly': {
+        const n = new Date(d.getFullYear(), d.getMonth() + 1, dom)
+        return n.toISOString().split('T')[0]
+      }
+      case 'quarterly': {
+        const n = new Date(d.getFullYear(), d.getMonth() + 3, dom)
+        return n.toISOString().split('T')[0]
+      }
+      case 'yearly': {
+        const n = new Date(d.getFullYear() + 1, d.getMonth(), dom)
+        return n.toISOString().split('T')[0]
+      }
+      default: {
+        const n = new Date(d.getFullYear(), d.getMonth() + 1, dom)
+        return n.toISOString().split('T')[0]
+      }
+    }
+  }
+
+  // List all templates
+  r.get('/', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT t.*, cat.name AS category_name, s.name AS supplier_name
+         FROM recurring_expense_templates t
+         LEFT JOIN categories cat ON cat.id = t.category_id
+         LEFT JOIN customers  s   ON s.id   = t.supplier_id
+         WHERE t.company_id = $1
+         ORDER BY t.is_active DESC, t.next_due_date ASC`,
+        [req.user.company_id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  // Create template
+  r.post('/', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { category_id, supplier_id, description, net_amount, vat_amount,
+              frequency, day_of_month, next_due_date, end_date, notes } = req.body
+      const total = (parseFloat(net_amount||0) + parseFloat(vat_amount||0)).toFixed(3)
+      const { rows: [row] } = await db.query(
+        `INSERT INTO recurring_expense_templates
+           (company_id, category_id, supplier_id, description, net_amount, vat_amount,
+            total_amount, frequency, day_of_month, next_due_date, end_date, notes, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::recur_frequency,$9,$10,$11,$12,$13) RETURNING *`,
+        [req.user.company_id, category_id||null, supplier_id||null, description,
+         net_amount, vat_amount||0, total,
+         frequency||'monthly', day_of_month||1,
+         next_due_date, end_date||null, notes||null, req.user.id])
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  // Update template
+  r.put('/:id', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { category_id, supplier_id, description, net_amount, vat_amount,
+              frequency, day_of_month, next_due_date, end_date, notes, is_active } = req.body
+      const total = (parseFloat(net_amount||0) + parseFloat(vat_amount||0)).toFixed(3)
+      const { rows: [row] } = await db.query(
+        `UPDATE recurring_expense_templates SET
+           category_id=$1, supplier_id=$2, description=$3, net_amount=$4, vat_amount=$5,
+           total_amount=$6, frequency=$7::recur_frequency, day_of_month=$8,
+           next_due_date=$9, end_date=$10, notes=$11, is_active=$12, updated_at=now()
+         WHERE id=$13 AND company_id=$14 RETURNING *`,
+        [category_id||null, supplier_id||null, description, net_amount, vat_amount||0, total,
+         frequency||'monthly', day_of_month||1, next_due_date, end_date||null,
+         notes||null, is_active !== false,
+         req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  // Toggle active/paused
+  r.patch('/:id/toggle', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { rows: [row] } = await db.query(
+        `UPDATE recurring_expense_templates SET is_active = NOT is_active, updated_at = now()
+         WHERE id=$1 AND company_id=$2 RETURNING *`,
+        [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ data: row, message: row.is_active ? 'Template activated' : 'Template paused' })
+    } catch (err) { next(err) }
+  })
+
+  // Delete template
+  r.delete('/:id', authorize('admin'), async (req, res, next) => {
+    try {
+      const { rows: [row] } = await db.query(
+        `DELETE FROM recurring_expense_templates WHERE id=$1 AND company_id=$2 RETURNING description`,
+        [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Not found' } })
+      res.json({ message: `"${row.description}" deleted` })
+    } catch (err) { next(err) }
+  })
+
+  // Manual generate — create an expense from this template right now
+  r.post('/:id/generate', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { rows: [tmpl] } = await db.query(
+        `SELECT * FROM recurring_expense_templates WHERE id=$1 AND company_id=$2`,
+        [req.params.id, req.user.company_id])
+      if (!tmpl) return res.status(404).json({ error: { message: 'Not found' } })
+
+      const expense_date = req.body.expense_date || new Date().toISOString().split('T')[0]
+      const { rows: [co] } = await db.query(
+        `SELECT COUNT(*) AS cnt FROM expenses WHERE company_id = $1`, [tmpl.company_id])
+      const expense_no = `EXP-${new Date().getFullYear()}-${String(parseInt(co.cnt)+1).padStart(4,'0')}`
+
+      const client = await db.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const { rows: [exp] } = await client.query(
+          `INSERT INTO expenses (id,company_id,expense_no,category_id,supplier_id,expense_date,
+             description,net_amount,vat_amount,total_amount,notes,created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          [uuid(), tmpl.company_id, expense_no, tmpl.category_id, tmpl.supplier_id,
+           expense_date, tmpl.description, tmpl.net_amount, tmpl.vat_amount, tmpl.total_amount,
+           tmpl.notes, req.user.id])
+
+        const newNext = nextDueDate(tmpl.frequency, tmpl.day_of_month, expense_date)
+        await client.query(
+          `UPDATE recurring_expense_templates
+           SET last_generated=$1, next_due_date=$2, updated_at=now() WHERE id=$3`,
+          [expense_date, newNext, tmpl.id])
+        await client.query('COMMIT')
+        res.status(201).json({ data: exp, next_due_date: newNext })
+      } catch (e) { await client.query('ROLLBACK'); throw e }
+      finally { client.release() }
+    } catch (err) { next(err) }
+  })
+
+  return r
+})()
+
 // ── Bank reconciliation ────────────────────────────────────
 module.exports.bankRouter = (() => {
   const r = Router()

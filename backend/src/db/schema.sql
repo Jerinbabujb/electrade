@@ -525,6 +525,33 @@ CREATE TABLE expenses (
 );
 
 -- ============================================================
+-- RECURRING EXPENSE TEMPLATES
+-- ============================================================
+CREATE TYPE recur_frequency AS ENUM ('weekly','monthly','quarterly','yearly');
+
+CREATE TABLE recurring_expense_templates (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id      UUID    NOT NULL REFERENCES companies(id),
+  category_id     UUID    REFERENCES categories(id),
+  supplier_id     UUID    REFERENCES customers(id),
+  description     VARCHAR(300) NOT NULL,
+  net_amount      NUMERIC(15,3) NOT NULL,
+  vat_amount      NUMERIC(15,3) NOT NULL DEFAULT 0.000,
+  total_amount    NUMERIC(15,3) NOT NULL,
+  frequency       recur_frequency NOT NULL DEFAULT 'monthly',
+  day_of_month    SMALLINT DEFAULT 1,          -- 1-28, used for monthly/quarterly/yearly
+  next_due_date   DATE    NOT NULL,
+  end_date        DATE,                        -- NULL = runs forever
+  is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+  last_generated  DATE,
+  notes           TEXT,
+  created_by      UUID    REFERENCES users(id),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_recur_exp_company ON recurring_expense_templates(company_id, is_active, next_due_date);
+
+-- ============================================================
 -- BANK ACCOUNTS & RECONCILIATION
 -- ============================================================
 CREATE TABLE bank_accounts (

@@ -5,6 +5,7 @@ const cron = require('node-cron');
 const { exec } = require('child_process');
 const fs   = require('fs');
 const path = require('path');
+const { v4: uuid } = require('uuid');
 const db          = require('../db');
 const emailSvc    = require('./emailService');
 const audit       = require('../utils/auditLog');
@@ -277,16 +278,99 @@ async function runLowStockAlerts(companyId = null) {
 // ── Automation cron (daily 08:00) ─────────────────────────────────────────────
 let automationTask = null
 
+// ── Recurring Expense Auto-Generation ────────────────────────────────────────
+/**
+ * Finds all active recurring expense templates where next_due_date <= today,
+ * generates an expense record for each, advances next_due_date to the next cycle.
+ * Safe to run multiple times per day — last_generated prevents double-posting.
+ */
+async function runRecurringExpenses() {
+  try {
+    const today = new Date().toISOString().split('T')[0]
+
+    const { rows: templates } = await db.query(`
+      SELECT t.*, c.name AS company_name
+      FROM recurring_expense_templates t
+      JOIN companies c ON c.id = t.company_id
+      WHERE t.is_active = true
+        AND t.next_due_date <= $1
+        AND (t.end_date IS NULL OR t.end_date >= $1)
+        AND (t.last_generated IS NULL OR t.last_generated < t.next_due_date)
+    `, [today])
+
+    if (!templates.length) return { generated: 0 }
+
+    let generated = 0
+    for (const tmpl of templates) {
+      try {
+        const client = await db.pool.connect()
+        try {
+          await client.query('BEGIN')
+
+          // Generate a unique expense_no
+          const { rows: [co] } = await client.query(
+            `SELECT COUNT(*) AS cnt FROM expenses WHERE company_id=$1`, [tmpl.company_id])
+          const year = new Date(tmpl.next_due_date).getFullYear()
+          const expense_no = `EXP-${year}-${String(parseInt(co.cnt)+1).padStart(4,'0')}`
+
+          await client.query(
+            `INSERT INTO expenses (id,company_id,expense_no,category_id,supplier_id,
+               expense_date,description,net_amount,vat_amount,total_amount,notes)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [uuid(), tmpl.company_id, expense_no,
+             tmpl.category_id, tmpl.supplier_id, tmpl.next_due_date,
+             tmpl.description, tmpl.net_amount, tmpl.vat_amount, tmpl.total_amount,
+             tmpl.notes])
+
+          // Advance next_due_date
+          const newNext = advanceDate(tmpl.frequency, tmpl.day_of_month, tmpl.next_due_date)
+          await client.query(
+            `UPDATE recurring_expense_templates
+             SET last_generated=$1, next_due_date=$2, updated_at=now() WHERE id=$3`,
+            [tmpl.next_due_date, newNext, tmpl.id])
+
+          await client.query('COMMIT')
+          generated++
+          console.log(`[scheduler] Recurring expense generated: ${expense_no} — ${tmpl.description} (${tmpl.company_name})`)
+        } catch (e) {
+          await client.query('ROLLBACK')
+          console.error(`[scheduler] Failed to generate recurring expense ${tmpl.id}:`, e.message)
+        } finally { client.release() }
+      } catch (e) {
+        console.error(`[scheduler] Recurring expense error for template ${tmpl.id}:`, e.message)
+      }
+    }
+
+    return { generated }
+  } catch (err) {
+    console.error('[scheduler] runRecurringExpenses failed:', err.message)
+    return { generated: 0, error: err.message }
+  }
+}
+
+function advanceDate(frequency, dayOfMonth, fromDateStr) {
+  const dom = Math.min(dayOfMonth || 1, 28)
+  const d = new Date(fromDateStr)
+  switch (frequency) {
+    case 'weekly':    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).toISOString().split('T')[0]
+    case 'monthly':   return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
+    case 'quarterly': return new Date(d.getFullYear(), d.getMonth() + 3,  dom).toISOString().split('T')[0]
+    case 'yearly':    return new Date(d.getFullYear() + 1, d.getMonth(), dom).toISOString().split('T')[0]
+    default:          return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
+  }
+}
+
 function reloadAutomation() {
   if (automationTask) { automationTask.stop(); automationTask = null }
 
   // Always schedule the daily check — it reads per-company enabled flags at runtime
   automationTask = cron.schedule('0 8 * * *', async () => {
     console.log('[scheduler] Running daily automation jobs…')
+    await runRecurringExpenses()
     await runOverdueReminders()
     await runLowStockAlerts()
   })
   console.log('[scheduler] Automation jobs scheduled — daily at 08:00')
 }
 
-module.exports = { reload, init, reloadAutomation, runOverdueReminders, runLowStockAlerts };
+module.exports = { reload, init, reloadAutomation, runOverdueReminders, runLowStockAlerts, runRecurringExpenses };

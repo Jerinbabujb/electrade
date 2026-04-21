@@ -134,6 +134,15 @@ export const expenseApi = {
   delete: (id)     => api.delete(`/expenses/${id}`),
 }
 
+export const recurringExpenseApi = {
+  list:     ()           => api.get('/recurring-expenses'),
+  create:   (data)       => api.post('/recurring-expenses', data),
+  update:   (id, data)   => api.put(`/recurring-expenses/${id}`, data),
+  toggle:   (id)         => api.patch(`/recurring-expenses/${id}/toggle`),
+  delete:   (id)         => api.delete(`/recurring-expenses/${id}`),
+  generate: (id, data)   => api.post(`/recurring-expenses/${id}/generate`, data || {}),
+}
+
 // ── Bank ───────────────────────────────────────
 export const bankApi = {
   accounts:    ()        => api.get('/bank/accounts'),
@@ -160,6 +169,8 @@ export const reportApi = {
   salesByProduct:     (params) => api.get('/reports/sales-by-product',  { params }),
   purchaseAnalysis:   (params) => api.get('/reports/purchase-analysis', { params }),
   inventoryAtDate:    (params) => api.get('/reports/inventory-at-date', { params }),
+  dailyClosing:       (params) => api.get('/reports/daily-closing',     { params }),
+  dailyClosingPrintUrl: (date) => `/api/v1/reports/daily-closing/print?date=${date}&token=${localStorage.getItem('et_token')}`,
 }
 
 // ── Public portal (no auth token) ──────────────
