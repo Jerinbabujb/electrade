@@ -420,72 +420,140 @@ function BarcodeScannerModal({ onClose, onProductFound }) {
   )
 }
 
-// ── Stock Count Panel ─────────────────────────────────────────
-function StockCountPanel({ onClose }) {
+// ── Cycle Count — export count sheet CSV ─────────────────────
+function exportCountSheet(session, items) {
+  const catName = session.category_name || 'All'
+  const headers = ['SKU','Product Name','Category','Unit','System Qty','Physical Qty (fill in)','Notes']
+  const lines = [headers.join(',')]
+  for (const it of items) {
+    lines.push([
+      it.sku,
+      `"${(it.product_name||'').replace(/"/g,'""')}"`,
+      `"${(it.category_name||'').replace(/"/g,'""')}"`,
+      it.unit || '',
+      it.system_qty ?? '',
+      '',
+      '',
+    ].join(','))
+  }
+  const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `count-sheet-${session.name.replace(/[^a-z0-9]/gi,'_')}-${new Date().toISOString().split('T')[0]}.csv`
+  a.click()
+}
+
+// ── Session Detail View ───────────────────────────────────────
+function SessionDetail({ sessionId, onBack }) {
   const qc = useQueryClient()
-  const [search, setSearch]         = useState('')
-  const [catFilter, setCatFilter]   = useState('')
-  const [counts, setCounts]         = useState({})   // { [productId]: string }
-  const [countNotes, setCountNotes] = useState(`Physical stock count — ${new Date().toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })}`)
+  const [search,      setSearch]      = useState('')
   const [onlyVariance, setOnlyVariance] = useState(false)
+  const [counts, setCounts]           = useState({})   // { [productId]: string }
+  const [dirty, setDirty]             = useState(false)
 
-  const { data: allProducts, isLoading } = useQuery({
-    queryKey: ['products', {}],
-    queryFn:  () => productApi.list({}).then(r => r.data.data),
-  })
-  const { data: cats } = useQuery({
-    queryKey: ['cats-product'],
-    queryFn:  () => categoryApi.list('product').then(r => r.data.data),
+  const { data: resp, isLoading } = useQuery({
+    queryKey: ['count-session', sessionId],
+    queryFn:  () => productApi.getSession(sessionId).then(r => r.data.data),
+    onSuccess: (d) => {
+      // Hydrate local counts from saved items
+      const initial = {}
+      for (const it of d.items || []) {
+        if (it.physical_qty !== null && it.physical_qty !== undefined) {
+          initial[it.product_id] = String(it.physical_qty)
+        }
+      }
+      setCounts(initial)
+      setDirty(false)
+    },
   })
 
-  const products = useMemo(() => {
-    let rows = (allProducts || []).filter(p => p.is_stock_tracked)
-    if (catFilter) rows = rows.filter(p => p.category_id === catFilter)
-    if (search)    rows = rows.filter(p =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      (p.sku || '').toLowerCase().includes(search.toLowerCase()))
-    if (onlyVariance) rows = rows.filter(p => {
-      const entered = counts[p.id]
+  const session  = resp || {}
+  const allItems = resp?.items || []
+
+  const displayItems = useMemo(() => {
+    let rows = allItems
+    if (search) rows = rows.filter(it =>
+      it.product_name.toLowerCase().includes(search.toLowerCase()) ||
+      (it.sku||'').toLowerCase().includes(search.toLowerCase()))
+    if (onlyVariance) rows = rows.filter(it => {
+      const entered = counts[it.product_id]
       if (entered === '' || entered === undefined) return false
-      return parseFloat(entered) !== parseFloat(p.stock_qty)
+      return Math.abs(parseFloat(entered) - parseFloat(it.system_qty)) >= 0.001
     })
     return rows
-  }, [allProducts, catFilter, search, onlyVariance, counts])
+  }, [allItems, search, onlyVariance, counts])
 
-  const variances = useMemo(() => (allProducts || []).filter(p => {
-    const entered = counts[p.id]
+  const variances = useMemo(() => allItems.filter(it => {
+    const entered = counts[it.product_id]
     if (entered === '' || entered === undefined) return false
-    return Math.abs(parseFloat(entered) - parseFloat(p.stock_qty)) >= 0.001
-  }), [allProducts, counts])
+    return Math.abs(parseFloat(entered) - parseFloat(it.system_qty)) >= 0.001
+  }), [allItems, counts])
 
-  const submitMut = useMutation({
+  const countedTotal = useMemo(() =>
+    allItems.filter(it => counts[it.product_id] !== undefined && counts[it.product_id] !== '').length,
+    [allItems, counts])
+
+  const setCount = (productId, val) => {
+    setCounts(prev => ({ ...prev, [productId]: val }))
+    setDirty(true)
+  }
+
+  const saveMut = useMutation({
     mutationFn: () => {
-      const adjustments = variances.map(p => ({
-        product_id:   p.id,
-        physical_qty: parseFloat(counts[p.id]),
+      const items = allItems.map(it => ({
+        product_id:   it.product_id,
+        physical_qty: counts[it.product_id] !== undefined && counts[it.product_id] !== ''
+          ? counts[it.product_id] : null,
       }))
-      return productApi.stockCount({ adjustments, count_notes: countNotes })
+      return productApi.saveSessionDraft(sessionId, { items })
     },
-    onSuccess: r => {
-      toast.success(r.data.message)
-      qc.invalidateQueries(['products'])
-      onClose()
+    onSuccess: () => {
+      toast.success('Draft saved')
+      setDirty(false)
+      qc.invalidateQueries(['count-sessions'])
+      qc.invalidateQueries(['count-session', sessionId])
     },
   })
 
-  const setCount = (id, val) => setCounts(prev => ({ ...prev, [id]: val }))
+  const applyMut = useMutation({
+    mutationFn: async () => {
+      // Save first, then apply
+      const items = allItems.map(it => ({
+        product_id:   it.product_id,
+        physical_qty: counts[it.product_id] !== undefined && counts[it.product_id] !== ''
+          ? counts[it.product_id] : null,
+      }))
+      await productApi.saveSessionDraft(sessionId, { items })
+      return productApi.applySession(sessionId).then(r => r.data)
+    },
+    onSuccess: (d) => {
+      toast.success(d.message)
+      qc.invalidateQueries(['products'])
+      qc.invalidateQueries(['count-sessions'])
+      qc.invalidateQueries(['count-session', sessionId])
+    },
+  })
+
+  const isComplete = session.status === 'complete'
 
   return (
     <div style={{ display:'flex', flexDirection:'column', flex:1, overflow:'hidden' }}>
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 14px',
         borderBottom:'2px solid var(--blue)', background:'#f0f4fb', flexShrink:0 }}>
-        <button onClick={onClose} style={{ background:'none', border:'none', fontSize:16, cursor:'pointer', color:'#555' }}>←</button>
-        <div style={{ fontWeight:700, fontSize:14, color:'var(--blue)' }}>Physical Stock Count</div>
+        <button onClick={onBack} style={{ background:'none', border:'none', fontSize:16, cursor:'pointer', color:'#555' }}>←</button>
+        <div>
+          <div style={{ fontWeight:700, fontSize:14, color:'var(--blue)' }}>{session.name || '…'}</div>
+          {session.category_name && <div style={{ fontSize:11, color:'#888' }}>Category: {session.category_name}</div>}
+        </div>
+        {isComplete && (
+          <span style={{ fontSize:11, background:'#e8f5e9', color:'#2e7d32', border:'1px solid #a5d6a7',
+            borderRadius:12, padding:'2px 10px', fontWeight:600 }}>✓ Applied</span>
+        )}
         <div style={{ flex:1 }}/>
-        {variances.length > 0 && (
+        {variances.length > 0 && !isComplete && (
           <span style={{ fontSize:12, color:'#e65100', fontWeight:600 }}>
-            {variances.length} product{variances.length !== 1 ? 's' : ''} with variance
+            {variances.length} variance{variances.length !== 1 ? 's' : ''}
           </span>
         )}
       </div>
@@ -496,131 +564,333 @@ function StockCountPanel({ onClose }) {
         <input value={search} onChange={e => setSearch(e.target.value)}
           placeholder="Search SKU / name…"
           style={{ height:26, padding:'0 8px', border:'1px solid #ccc', borderRadius:2, fontSize:12, width:200 }}/>
-        <select value={catFilter} onChange={e => setCatFilter(e.target.value)}
-          style={{ height:26, padding:'0 6px', border:'1px solid #ccc', borderRadius:2, fontSize:12 }}>
-          <option value="">All Categories</option>
-          {(cats||[]).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
         <label style={{ display:'flex', alignItems:'center', gap:5, fontSize:12, cursor:'pointer' }}>
           <input type="checkbox" checked={onlyVariance} onChange={e => setOnlyVariance(e.target.checked)}/>
-          Show variances only
+          Variances only
         </label>
         <div style={{ flex:1 }}/>
-        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-          <label style={{ fontSize:11, color:'#555', whiteSpace:'nowrap' }}>Count Notes:</label>
-          <input value={countNotes} onChange={e => setCountNotes(e.target.value)}
-            style={{ height:26, padding:'0 8px', border:'1px solid #ccc', borderRadius:2, fontSize:12, width:280 }}/>
-        </div>
-        <button className="btn primary"
-          disabled={submitMut.isPending || variances.length === 0}
-          onClick={() => submitMut.mutate()}
-          style={{ background: variances.length > 0 ? 'var(--blue)' : undefined }}>
-          {submitMut.isPending ? '⏳ Applying…' : `✓ Apply Count (${variances.length} changes)`}
+        <button className="btn" onClick={() => exportCountSheet(session, allItems)}
+          title="Export a blank count sheet CSV for physical counting">
+          ⬇ Count Sheet
         </button>
-        <button className="btn" onClick={onClose}>Cancel</button>
+        {!isComplete && (
+          <>
+            <button className="btn"
+              disabled={!dirty || saveMut.isPending}
+              onClick={() => saveMut.mutate()}
+              style={{ background: dirty ? '#fff8e1' : undefined, border: dirty ? '1px solid #ffe082' : undefined }}>
+              {saveMut.isPending ? '⏳ Saving…' : dirty ? '💾 Save Draft*' : '💾 Saved'}
+            </button>
+            <button className="btn primary"
+              disabled={applyMut.isPending || variances.length === 0}
+              onClick={() => window.confirm(`Apply count? This will adjust stock for ${variances.length} product(s).`) && applyMut.mutate()}>
+              {applyMut.isPending ? '⏳ Applying…' : `✓ Apply Count (${variances.length})`}
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Instruction */}
-      <div style={{ padding:'5px 14px', background:'#fffde7', borderBottom:'1px solid #fff176',
-        fontSize:11, color:'#5d4037', flexShrink:0 }}>
-        Enter the <strong>actual physical count</strong> in the "Physical Qty" column for each product.
-        Leave blank to skip. Only products where the count differs from system stock will be adjusted.
-      </div>
+      {/* Hint bar */}
+      {!isComplete && (
+        <div style={{ padding:'5px 14px', background:'#fffde7', borderBottom:'1px solid #fff176',
+          fontSize:11, color:'#5d4037', flexShrink:0 }}>
+          Enter actual physical quantities. Leave blank to skip. Use <strong>Save Draft</strong> to preserve progress between sessions.
+          {dirty && <span style={{ color:'#e65100', marginLeft:8 }}>● Unsaved changes</span>}
+        </div>
+      )}
 
       {/* Table */}
       <div style={{ flex:1, overflowY:'auto' }}>
-        <table className="data-table" style={{ fontSize:12 }}>
-          <thead>
-            <tr>
-              <th>SKU</th>
-              <th>Product Name</th>
-              <th>Category</th>
-              <th>Unit</th>
-              <th style={{ textAlign:'right' }}>System Qty</th>
-              <th style={{ textAlign:'center', background:'var(--blue-light)', minWidth:130 }}>Physical Qty</th>
-              <th style={{ textAlign:'right' }}>Variance</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && <tr><td colSpan={8} style={{ textAlign:'center', padding:20, color:'#aaa' }}>Loading…</td></tr>}
-            {!isLoading && products.length === 0 && (
-              <tr><td colSpan={8} style={{ textAlign:'center', padding:20, color:'#aaa' }}>No products found</td></tr>
-            )}
-            {products.map(p => {
-              const sysQty   = parseFloat(p.stock_qty)
-              const entered  = counts[p.id]
-              const hasEntry = entered !== '' && entered !== undefined
-              const physQty  = hasEntry ? parseFloat(entered) : null
-              const variance = hasEntry ? physQty - sysQty : null
-              const hasVar   = variance !== null && Math.abs(variance) >= 0.001
-              const isLow    = sysQty <= parseFloat(p.stock_min)
-              const isOut    = sysQty <= 0
+        {isLoading
+          ? <div style={{ textAlign:'center', padding:40, color:'#aaa' }}>Loading…</div>
+          : (
+          <table className="data-table" style={{ fontSize:12 }}>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Product Name</th>
+                <th>Category</th>
+                <th>Unit</th>
+                <th style={{ textAlign:'right' }}>System Qty</th>
+                <th style={{ textAlign:'center', background:'var(--blue-light)', minWidth:130 }}>
+                  Physical Qty
+                </th>
+                <th style={{ textAlign:'right' }}>Variance</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayItems.length === 0 && (
+                <tr><td colSpan={8} style={{ textAlign:'center', padding:20, color:'#aaa' }}>No products found</td></tr>
+              )}
+              {displayItems.map(it => {
+                const sysQty   = parseFloat(it.system_qty)
+                const entered  = counts[it.product_id]
+                const hasEntry = entered !== '' && entered !== undefined
+                const physQty  = hasEntry ? parseFloat(entered) : null
+                const variance = hasEntry ? physQty - sysQty : null
+                const hasVar   = variance !== null && Math.abs(variance) >= 0.001
+                const curQty   = parseFloat(it.current_system_qty)
+                const isLow    = curQty <= parseFloat(it.stock_min || 0)
+                const isOut    = curQty <= 0
 
-              let rowBg = 'transparent'
-              if (hasVar && variance > 0)  rowBg = '#f1f8e9'
-              if (hasVar && variance < 0)  rowBg = '#fff5f5'
-              if (hasEntry && !hasVar)     rowBg = '#f5f5f5'
+                let rowBg = 'transparent'
+                if (hasVar && variance > 0)  rowBg = '#f1f8e9'
+                if (hasVar && variance < 0)  rowBg = '#fff5f5'
+                if (hasEntry && !hasVar)     rowBg = '#f5f5f5'
 
-              return (
-                <tr key={p.id} style={{ background: rowBg }}>
-                  <td style={{ color:'var(--blue)', fontWeight:600 }}>{p.sku}</td>
-                  <td>{p.name}</td>
-                  <td style={{ color:'#888', fontSize:11 }}>{p.category_name || '—'}</td>
-                  <td>{p.unit}</td>
-                  <td style={{ textAlign:'right', fontWeight:600,
-                    color: isOut ? '#c62828' : isLow ? '#e65100' : '#333' }}>
-                    {sysQty % 1 === 0 ? sysQty : parseFloat(sysQty).toFixed(3)}
-                  </td>
-                  <td style={{ textAlign:'center', background:'#f0f7ff', padding:'2px 6px' }}>
-                    <input
-                      type="number" step="1" min="0"
-                      value={entered ?? ''}
-                      onChange={e => setCount(p.id, e.target.value)}
-                      placeholder="—"
-                      style={{
-                        width:90, textAlign:'right', fontSize:12,
-                        border: hasVar ? '2px solid var(--blue)' : '1px solid #ccc',
-                        borderRadius:2, padding:'2px 6px',
-                        background: hasVar ? '#fff' : '#fafafa',
-                      }}
-                    />
-                  </td>
-                  <td style={{ textAlign:'right', fontWeight: hasVar ? 700 : 400,
-                    color: variance === null ? '#ccc'
-                         : !hasVar          ? '#999'
-                         : variance > 0     ? '#2e7d32'
-                         :                   '#c62828' }}>
-                    {variance === null ? '—'
-                     : !hasVar         ? '±0'
-                     : variance > 0    ? `+${variance % 1 === 0 ? variance : variance.toFixed(3)}`
-                     :                  `${variance % 1 === 0 ? variance : variance.toFixed(3)}`}
-                  </td>
-                  <td>
-                    {hasVar && variance > 0 && <span style={{ fontSize:10, color:'#2e7d32', fontWeight:600 }}>↑ Surplus</span>}
-                    {hasVar && variance < 0 && <span style={{ fontSize:10, color:'#c62828', fontWeight:600 }}>↓ Shortfall</span>}
-                    {hasEntry && !hasVar     && <span style={{ fontSize:10, color:'#888' }}>✓ No change</span>}
-                    {!hasEntry && isOut      && <span style={{ fontSize:10, color:'#c62828' }}>Out of stock</span>}
-                    {!hasEntry && !isOut && isLow && <span style={{ fontSize:10, color:'#e65100' }}>Low stock</span>}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                return (
+                  <tr key={it.product_id} style={{ background: rowBg }}>
+                    <td style={{ color:'var(--blue)', fontWeight:600 }}>{it.sku}</td>
+                    <td>{it.product_name}</td>
+                    <td style={{ color:'#888', fontSize:11 }}>{it.category_name || '—'}</td>
+                    <td>{it.unit}</td>
+                    <td style={{ textAlign:'right', fontWeight:600,
+                      color: isOut ? '#c62828' : isLow ? '#e65100' : '#333' }}>
+                      {sysQty % 1 === 0 ? sysQty : sysQty.toFixed(3)}
+                    </td>
+                    <td style={{ textAlign:'center', background: isComplete ? undefined : '#f0f7ff', padding:'2px 6px' }}>
+                      {isComplete
+                        ? (hasEntry ? (sysQty % 1 === 0 ? physQty : physQty?.toFixed(3)) : '—')
+                        : (
+                        <input
+                          type="number" step="1" min="0"
+                          value={entered ?? ''}
+                          onChange={e => setCount(it.product_id, e.target.value)}
+                          placeholder="—"
+                          style={{
+                            width:90, textAlign:'right', fontSize:12,
+                            border: hasVar ? '2px solid var(--blue)' : '1px solid #ccc',
+                            borderRadius:2, padding:'2px 6px',
+                            background: hasVar ? '#fff' : '#fafafa',
+                          }}
+                        />
+                      )}
+                    </td>
+                    <td style={{ textAlign:'right', fontWeight: hasVar ? 700 : 400,
+                      color: variance === null ? '#ccc'
+                           : !hasVar          ? '#999'
+                           : variance > 0     ? '#2e7d32'
+                           :                   '#c62828' }}>
+                      {variance === null ? '—'
+                       : !hasVar         ? '±0'
+                       : variance > 0    ? `+${variance % 1 === 0 ? variance : variance.toFixed(3)}`
+                       :                  `${variance % 1 === 0 ? variance : variance.toFixed(3)}`}
+                    </td>
+                    <td>
+                      {hasVar && variance > 0 && <span style={{ fontSize:10, color:'#2e7d32', fontWeight:600 }}>↑ Surplus</span>}
+                      {hasVar && variance < 0 && <span style={{ fontSize:10, color:'#c62828', fontWeight:600 }}>↓ Shortfall</span>}
+                      {hasEntry && !hasVar     && <span style={{ fontSize:10, color:'#888' }}>✓ No change</span>}
+                      {!hasEntry && isOut      && <span style={{ fontSize:10, color:'#c62828' }}>Out of stock</span>}
+                      {!hasEntry && !isOut && isLow && <span style={{ fontSize:10, color:'#e65100' }}>Low stock</span>}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      {/* Summary footer */}
+      {/* Footer */}
       <div style={{ padding:'6px 14px', borderTop:'1px solid #e0e0e0', background:'#fafafa',
         fontSize:11, color:'#555', display:'flex', gap:16, flexShrink:0 }}>
-        <span>Showing {products.length} of {(allProducts||[]).filter(p=>p.is_stock_tracked).length} stock-tracked products</span>
+        <span>{allItems.length} products in session</span>
         <span>|</span>
-        <span style={{ color: variances.filter(p=>parseFloat(counts[p.id])-parseFloat(p.stock_qty)>0).length>0?'#2e7d32':'#888' }}>
-          ↑ Surplus: {variances.filter(p=>parseFloat(counts[p.id])-parseFloat(p.stock_qty)>0).length}
+        <span style={{ color: countedTotal > 0 ? 'var(--blue)' : '#aaa' }}>Counted: {countedTotal}</span>
+        <span>|</span>
+        <span style={{ color: variances.filter(it => parseFloat(counts[it.product_id]) - parseFloat(it.system_qty) > 0).length > 0 ? '#2e7d32' : '#aaa' }}>
+          ↑ Surplus: {variances.filter(it => parseFloat(counts[it.product_id]) - parseFloat(it.system_qty) > 0).length}
         </span>
-        <span style={{ color: variances.filter(p=>parseFloat(counts[p.id])-parseFloat(p.stock_qty)<0).length>0?'#c62828':'#888' }}>
-          ↓ Shortfall: {variances.filter(p=>parseFloat(counts[p.id])-parseFloat(p.stock_qty)<0).length}
+        <span style={{ color: variances.filter(it => parseFloat(counts[it.product_id]) - parseFloat(it.system_qty) < 0).length > 0 ? '#c62828' : '#aaa' }}>
+          ↓ Shortfall: {variances.filter(it => parseFloat(counts[it.product_id]) - parseFloat(it.system_qty) < 0).length}
         </span>
+        {session.completed_at && (
+          <span style={{ marginLeft:'auto', color:'#2e7d32' }}>
+            Applied: {new Date(session.completed_at).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })}
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Cycle Count Panel (sessions list + new session dialog) ────
+function CycleCountPanel({ onClose }) {
+  const qc = useQueryClient()
+  const [activeSessionId, setActiveSessionId] = useState(null)
+  const [showNewForm, setShowNewForm]         = useState(false)
+  const [newName, setNewName]                 = useState(`Count ${new Date().toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })}`)
+  const [newCatId, setNewCatId]               = useState('')
+  const [newNotes, setNewNotes]               = useState('')
+
+  const { data: sessions, isLoading } = useQuery({
+    queryKey: ['count-sessions'],
+    queryFn:  () => productApi.listSessions().then(r => r.data.data),
+  })
+  const { data: cats } = useQuery({
+    queryKey: ['cats-product'],
+    queryFn:  () => categoryApi.list('product').then(r => r.data.data),
+  })
+
+  const createMut = useMutation({
+    mutationFn: () => productApi.createSession({
+      name: newName.trim(), category_id: newCatId || null, notes: newNotes || null,
+    }),
+    onSuccess: (r) => {
+      toast.success('Session created')
+      qc.invalidateQueries(['count-sessions'])
+      setShowNewForm(false)
+      setActiveSessionId(r.data.data.id)
+    },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Failed to create'),
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (id) => productApi.deleteSession(id),
+    onSuccess: () => { toast.success('Session deleted'); qc.invalidateQueries(['count-sessions']) },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Cannot delete'),
+  })
+
+  if (activeSessionId) {
+    return <SessionDetail sessionId={activeSessionId} onBack={() => setActiveSessionId(null)} />
+  }
+
+  const drafts    = (sessions || []).filter(s => s.status === 'draft')
+  const completed = (sessions || []).filter(s => s.status === 'complete')
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', flex:1, overflow:'hidden' }}>
+      {/* Header */}
+      <div style={{ display:'flex', alignItems:'center', gap:10, padding:'8px 14px',
+        borderBottom:'2px solid var(--blue)', background:'#f0f4fb', flexShrink:0 }}>
+        <button onClick={onClose} style={{ background:'none', border:'none', fontSize:16, cursor:'pointer', color:'#555' }}>←</button>
+        <div style={{ fontWeight:700, fontSize:14, color:'var(--blue)' }}>Cycle Count Sessions</div>
+        <div style={{ flex:1 }}/>
+        <button className="btn primary" onClick={() => setShowNewForm(true)}>＋ New Session</button>
+      </div>
+
+      {/* Hint */}
+      <div style={{ padding:'6px 14px', background:'#e3f2fd', borderBottom:'1px solid #bbdefb',
+        fontSize:11, color:'#1565c0', flexShrink:0 }}>
+        Create a named session per category/area. Counts are saved as a draft — resume any time.
+        Once satisfied, apply the session to update stock.
+      </div>
+
+      {/* Sessions list */}
+      <div style={{ flex:1, overflowY:'auto', padding:14 }}>
+        {isLoading && <div style={{ textAlign:'center', padding:40, color:'#aaa' }}>Loading…</div>}
+
+        {/* New session form */}
+        {showNewForm && (
+          <div style={{ background:'#f9fbe7', border:'1px solid #c5e1a5', borderRadius:6,
+            padding:14, marginBottom:14 }}>
+            <div style={{ fontWeight:700, fontSize:13, marginBottom:10, color:'#33691e' }}>New Count Session</div>
+            <div style={{ display:'flex', gap:10, flexWrap:'wrap', alignItems:'flex-end' }}>
+              <div>
+                <label style={{ fontSize:11, color:'#555', display:'block', marginBottom:3 }}>Session Name *</label>
+                <input value={newName} onChange={e => setNewName(e.target.value)}
+                  style={{ height:28, padding:'0 8px', border:'1px solid #ccc', borderRadius:3, fontSize:12, width:240 }}
+                  placeholder="e.g. April 2026 Cycle Count - Electronics"/>
+              </div>
+              <div>
+                <label style={{ fontSize:11, color:'#555', display:'block', marginBottom:3 }}>Category (optional)</label>
+                <select value={newCatId} onChange={e => setNewCatId(e.target.value)}
+                  style={{ height:28, padding:'0 8px', border:'1px solid #ccc', borderRadius:3, fontSize:12, minWidth:160 }}>
+                  <option value="">All Categories</option>
+                  {(cats||[]).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize:11, color:'#555', display:'block', marginBottom:3 }}>Notes</label>
+                <input value={newNotes} onChange={e => setNewNotes(e.target.value)}
+                  style={{ height:28, padding:'0 8px', border:'1px solid #ccc', borderRadius:3, fontSize:12, width:200 }}
+                  placeholder="Optional notes…"/>
+              </div>
+              <button className="btn primary" disabled={!newName.trim() || createMut.isPending}
+                onClick={() => createMut.mutate()}>
+                {createMut.isPending ? '⏳…' : '✓ Create'}
+              </button>
+              <button className="btn" onClick={() => setShowNewForm(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {/* Draft sessions */}
+        {drafts.length > 0 && (
+          <div style={{ marginBottom:20 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:'#888', textTransform:'uppercase',
+              letterSpacing:'.5px', marginBottom:8 }}>In Progress ({drafts.length})</div>
+            {drafts.map(s => (
+              <div key={s.id} style={{ display:'flex', alignItems:'center', gap:10,
+                padding:'10px 14px', marginBottom:6, background:'#fff', border:'1px solid #e0e0e0',
+                borderRadius:6, cursor:'pointer' }}
+                onClick={() => setActiveSessionId(s.id)}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontWeight:600, fontSize:13 }}>{s.name}</div>
+                  <div style={{ fontSize:11, color:'#888', marginTop:2 }}>
+                    {s.category_name ? `Category: ${s.category_name}` : 'All Categories'}
+                    {' · '}{s.item_count} products
+                    {s.counted_items > 0 && ` · ${s.counted_items} counted`}
+                    {s.variance_count > 0 && <span style={{ color:'#e65100' }}> · {s.variance_count} variances</span>}
+                    {' · '}Created {new Date(s.created_at).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })}
+                    {s.created_by_name && ` by ${s.created_by_name}`}
+                  </div>
+                  {s.notes && <div style={{ fontSize:11, color:'#777', marginTop:2 }}>📝 {s.notes}</div>}
+                </div>
+                <div style={{ display:'flex', gap:6, flexShrink:0 }}>
+                  <span style={{ fontSize:11, background:'#fff8e1', color:'#e65100',
+                    border:'1px solid #ffe082', borderRadius:12, padding:'2px 10px' }}>Draft</span>
+                  <button className="btn" style={{ fontSize:11, padding:'2px 10px' }}
+                    onClick={e => { e.stopPropagation(); setActiveSessionId(s.id) }}>Open →</button>
+                  <button className="btn danger" style={{ fontSize:11, padding:'2px 8px' }}
+                    onClick={e => {
+                      e.stopPropagation()
+                      window.confirm(`Delete session "${s.name}"?`) && deleteMut.mutate(s.id)
+                    }}>✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Completed sessions */}
+        {completed.length > 0 && (
+          <div>
+            <div style={{ fontSize:11, fontWeight:700, color:'#888', textTransform:'uppercase',
+              letterSpacing:'.5px', marginBottom:8 }}>Completed ({completed.length})</div>
+            {completed.map(s => (
+              <div key={s.id} style={{ display:'flex', alignItems:'center', gap:10,
+                padding:'10px 14px', marginBottom:6, background:'#f9f9f9', border:'1px solid #e8e8e8',
+                borderRadius:6, cursor:'pointer' }}
+                onClick={() => setActiveSessionId(s.id)}>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontWeight:600, fontSize:13, color:'#555' }}>{s.name}</div>
+                  <div style={{ fontSize:11, color:'#888', marginTop:2 }}>
+                    {s.category_name ? `Category: ${s.category_name}` : 'All Categories'}
+                    {' · '}{s.item_count} products · {s.variance_count} adjustments
+                    {s.completed_at && ` · Applied ${new Date(s.completed_at).toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })}`}
+                  </div>
+                </div>
+                <span style={{ fontSize:11, background:'#e8f5e9', color:'#2e7d32',
+                  border:'1px solid #a5d6a7', borderRadius:12, padding:'2px 10px', flexShrink:0 }}>✓ Applied</span>
+                <button className="btn" style={{ fontSize:11, padding:'2px 10px', flexShrink:0 }}
+                  onClick={e => { e.stopPropagation(); setActiveSessionId(s.id) }}>View →</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!isLoading && (sessions||[]).length === 0 && !showNewForm && (
+          <div style={{ textAlign:'center', padding:60, color:'#aaa' }}>
+            <div style={{ fontSize:32, marginBottom:10 }}>📦</div>
+            <div style={{ fontSize:14, fontWeight:600, marginBottom:6 }}>No count sessions yet</div>
+            <div style={{ fontSize:12 }}>Create a session per category to do a gradual cycle count</div>
+            <button className="btn primary" style={{ marginTop:16 }} onClick={() => setShowNewForm(true)}>
+              ＋ New Session
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -704,7 +974,7 @@ export default function ProductsModule() {
     onSuccess: () => { toast.success(editing?'Product updated':'Product created'); qc.invalidateQueries(['products']); setShowForm(false); setEditing(null) }
   })
 
-  const empty = { sku:'',barcode:'',name:'',category_id:'',brand:'',unit:'pcs',cost_price:'',price_1:'',price_2:'',price_3:'',vat_rate:10,voltage_rating:'',ampere_rating:'',wattage:'',stock_min:10,is_stock_tracked:true,is_sales_item:true,is_purchase_item:true }
+  const empty = { sku:'',barcode:'',name:'',category_id:'',brand:'',unit:'pcs',cost_price:'',price_1:'',price_2:'',price_3:'',vat_rate:10,voltage_rating:'',ampere_rating:'',wattage:'',stock_min:10,product_type:'stock',is_stock_tracked:true,is_sales_item:true,is_purchase_item:true }
   const [form, setForm] = useState(empty)
   const F = (k,v) => setForm(f=>({...f,[k]:v}))
 
@@ -715,7 +985,7 @@ export default function ProductsModule() {
     setForm({...empty,...r}); setEditing(r); setShowForm(true)
   }
 
-  if (showStockCount) return <StockCountPanel onClose={() => setShowStockCount(false)} />
+  if (showStockCount) return <CycleCountPanel onClose={() => setShowStockCount(false)} />
 
   return (
     <div style={{display:'flex',flexDirection:'column',flex:1,overflow:'hidden'}}>
@@ -748,22 +1018,30 @@ export default function ProductsModule() {
         <table className="data-table">
           <thead><tr>
             <th style={{width:28}}><input type="checkbox"/></th>
-            <th>SKU / Part No.</th><th>Description</th><th>Brand</th><th>Category</th>
+            <th>SKU / Part No.</th><th>Description</th><th>Type</th><th>Brand</th><th>Category</th>
             <th>Unit</th><th>Voltage</th>
             <th className="right">Cost BHD</th><th className="right">Price 1</th><th className="right">Price 2</th>
             <th className="right">Stock</th><th>Status</th>
           </tr></thead>
           <tbody>
-            {isLoading&&<tr className="empty-row"><td colSpan={12}>Loading...</td></tr>}
-            {!isLoading&&!rows.length&&<tr className="empty-row"><td colSpan={12}>No products found</td></tr>}
+            {isLoading&&<tr className="empty-row"><td colSpan={13}>Loading...</td></tr>}
+            {!isLoading&&!rows.length&&<tr className="empty-row"><td colSpan={13}>No products found</td></tr>}
             {rows.map(p=>{
               const isLow = parseFloat(p.stock_qty)<=parseFloat(p.stock_min)
               const isOut = parseFloat(p.stock_qty)<=0
+              const ptype = p.product_type || 'stock'
+              const typeLabel = ptype==='service' ? { label:'⚙ Service', color:'#2e7d32', bg:'#e8f5e9' }
+                              : ptype==='non_stock' ? { label:'🛒 Non-Stock', color:'#e65100', bg:'#fff3e0' }
+                              : null
               return (
                 <tr key={p.id} className={selectedId===p.id?'selected':''} onClick={()=>setSelectedId(p.id)} onDoubleClick={()=>{setSelectedId(p.id);openEdit()}}>
                   <td><input type="checkbox" checked={selectedId===p.id} onChange={()=>setSelectedId(p.id)}/></td>
                   <td style={{color:'var(--blue)',fontWeight:600}}>{p.sku}</td>
                   <td>{p.name}</td>
+                  <td>{typeLabel
+                    ? <span style={{fontSize:10,fontWeight:600,padding:'1px 6px',borderRadius:10,background:typeLabel.bg,color:typeLabel.color,whiteSpace:'nowrap'}}>{typeLabel.label}</span>
+                    : <span style={{fontSize:10,color:'#aaa'}}>Stock</span>}
+                  </td>
                   <td>{p.brand||'—'}</td>
                   <td>{p.category_name||'—'}</td>
                   <td>{p.unit}</td>
@@ -771,8 +1049,16 @@ export default function ProductsModule() {
                   <td className="right">{fmtBhd(p.cost_price)}</td>
                   <td className="right">{fmtBhd(p.price_1)}</td>
                   <td className="right">{fmtBhd(p.price_2)}</td>
-                  <td className="right" style={{fontWeight:600,color:isOut?'#c62828':isLow?'#e65100':'#2e7d32'}}>{p.stock_qty}</td>
-                  <td>{isOut?<span className="badge badge-overdue">Out of Stock</span>:isLow?<span className="badge badge-unpaid">Low Stock</span>:<span className="badge badge-paid">In Stock</span>}</td>
+                  <td className="right" style={{fontWeight:600,color:isOut?'#c62828':isLow?'#e65100':'#2e7d32'}}>
+                    {ptype==='stock' ? p.stock_qty : '—'}
+                  </td>
+                  <td>
+                    {ptype==='service' ? <span className="badge" style={{background:'#e8f5e9',color:'#2e7d32',border:'1px solid #a5d6a7'}}>Service</span>
+                     : ptype==='non_stock' ? <span className="badge" style={{background:'#fff3e0',color:'#e65100',border:'1px solid #ffcc80'}}>Non-Stock</span>
+                     : isOut ? <span className="badge badge-overdue">Out of Stock</span>
+                     : isLow ? <span className="badge badge-unpaid">Low Stock</span>
+                     : <span className="badge badge-paid">In Stock</span>}
+                  </td>
                 </tr>
               )
             })}
@@ -810,10 +1096,29 @@ export default function ProductsModule() {
               <button className="btn" onClick={()=>setShowForm(false)}>✕ Cancel</button>
             </div>
             <div className="modal-body" style={{padding:12}}>
+              {/* Product Type selector */}
+              <div style={{display:'flex',gap:6,marginBottom:12}}>
+                {[
+                  { val:'stock',     label:'📦 Stock Item',     hint:'Tracked in inventory', color:'#1565c0', bg:'#e3f2fd' },
+                  { val:'non_stock', label:'🛒 Non-Stock Item',  hint:'Not tracked (supplier-sourced)', color:'#e65100', bg:'#fff3e0' },
+                  { val:'service',   label:'⚙ Service',         hint:'Labour / installation', color:'#2e7d32', bg:'#e8f5e9' },
+                ].map(t => (
+                  <div key={t.val}
+                    onClick={() => { F('product_type', t.val); if (t.val !== 'stock') F('is_stock_tracked', false) }}
+                    style={{ flex:1, border:`2px solid ${form.product_type===t.val ? t.color : '#e0e0e0'}`,
+                      borderRadius:6, padding:'8px 10px', cursor:'pointer', textAlign:'center',
+                      background: form.product_type===t.val ? t.bg : '#fafafa',
+                      transition:'all .15s' }}>
+                    <div style={{fontWeight:700, fontSize:13, color: form.product_type===t.val ? t.color : '#555' }}>{t.label}</div>
+                    <div style={{fontSize:10, color:'#888', marginTop:2}}>{t.hint}</div>
+                  </div>
+                ))}
+              </div>
+
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:10}}>
                 <div className="field"><label>SKU / Part No. *</label><input value={form.sku} onChange={e=>F('sku',e.target.value)} placeholder="e.g. CBL-6MM-3C"/></div>
                 <div className="field"><label>Barcode</label><input value={form.barcode||''} onChange={e=>F('barcode',e.target.value)}/></div>
-                <div className="field" style={{gridColumn:'span 2'}}><label>Product Name *</label><input value={form.name} onChange={e=>F('name',e.target.value)}/></div>
+                <div className="field" style={{gridColumn:'span 2'}}><label>Product / Service Name *</label><input value={form.name} onChange={e=>F('name',e.target.value)}/></div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:10}}>
                 <div className="field"><label>Category</label>
@@ -831,16 +1136,18 @@ export default function ProductsModule() {
                 <div className="field"><label>Brand</label><input value={form.brand||''} onChange={e=>F('brand',e.target.value)}/></div>
                 <div className="field"><label>Unit</label>
                   <select value={form.unit} onChange={e=>F('unit',e.target.value)}>
-                    {['pcs','mtr','box','reel','kg','set','pack','ltr'].map(u=><option key={u}>{u}</option>)}
+                    {['pcs','mtr','box','reel','kg','set','pack','ltr','hr','job'].map(u=><option key={u}>{u}</option>)}
                   </select>
                 </div>
                 <div className="field"><label>VAT Rate %</label><input type="number" value={form.vat_rate} onChange={e=>F('vat_rate',e.target.value)}/></div>
               </div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:10}}>
-                <div className="field"><label>Voltage Rating</label><input value={form.voltage_rating||''} onChange={e=>F('voltage_rating',e.target.value)} placeholder="e.g. 240V, 415V"/></div>
-                <div className="field"><label>Ampere Rating</label><input value={form.ampere_rating||''} onChange={e=>F('ampere_rating',e.target.value)} placeholder="e.g. 32A"/></div>
-                <div className="field"><label>Wattage</label><input value={form.wattage||''} onChange={e=>F('wattage',e.target.value)} placeholder="e.g. 18W"/></div>
-              </div>
+              {form.product_type === 'stock' && (
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8,marginBottom:10}}>
+                  <div className="field"><label>Voltage Rating</label><input value={form.voltage_rating||''} onChange={e=>F('voltage_rating',e.target.value)} placeholder="e.g. 240V, 415V"/></div>
+                  <div className="field"><label>Ampere Rating</label><input value={form.ampere_rating||''} onChange={e=>F('ampere_rating',e.target.value)} placeholder="e.g. 32A"/></div>
+                  <div className="field"><label>Wattage</label><input value={form.wattage||''} onChange={e=>F('wattage',e.target.value)} placeholder="e.g. 18W"/></div>
+                </div>
+              )}
               <div style={{background:'#e4e8ee',padding:'4px 8px',fontWeight:700,fontSize:11,marginBottom:8,textTransform:'uppercase',letterSpacing:'.3px'}}>Pricing (BHD excl. VAT)</div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:10}}>
                 <div className="field"><label>Cost Price *</label><input type="number" step="0.001" value={form.cost_price} onChange={e=>F('cost_price',e.target.value)}/></div>
@@ -849,13 +1156,17 @@ export default function ProductsModule() {
                 <div className="field"><label>Price 3 — Contractor</label><input type="number" step="0.001" value={form.price_3||''} onChange={e=>F('price_3',e.target.value)}/></div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:10}}>
-                <div className="field"><label>Low Stock Alert (min qty)</label><input type="number" value={form.stock_min} onChange={e=>F('stock_min',e.target.value)}/></div>
-                <div className="field" style={{justifyContent:'center'}}>
-                  <label>Track Stock</label>
-                  <label style={{display:'flex',alignItems:'center',gap:6,marginTop:6,cursor:'pointer'}}>
-                    <input type="checkbox" checked={!!form.is_stock_tracked} onChange={e=>F('is_stock_tracked',e.target.checked)}/> Yes
-                  </label>
-                </div>
+                {form.product_type === 'stock' && (
+                  <div className="field"><label>Low Stock Alert (min qty)</label><input type="number" value={form.stock_min} onChange={e=>F('stock_min',e.target.value)}/></div>
+                )}
+                {form.product_type === 'stock' && (
+                  <div className="field" style={{justifyContent:'center'}}>
+                    <label>Track Stock</label>
+                    <label style={{display:'flex',alignItems:'center',gap:6,marginTop:6,cursor:'pointer'}}>
+                      <input type="checkbox" checked={!!form.is_stock_tracked} onChange={e=>F('is_stock_tracked',e.target.checked)}/> Yes
+                    </label>
+                  </div>
+                )}
                 <div className="field" style={{justifyContent:'center'}}>
                   <label>Sales Item</label>
                   <label style={{display:'flex',alignItems:'center',gap:6,marginTop:6,cursor:'pointer'}}>

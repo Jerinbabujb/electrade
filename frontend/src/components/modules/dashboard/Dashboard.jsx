@@ -27,7 +27,7 @@ export default function Dashboard() {
     ? (customFrom && customTo ? { period, from: customFrom, to: customTo } : null)
     : { period }
 
-  const { data: invData }   = useQuery({ queryKey: ['invoices-dash'],  queryFn: () => invoiceApi.list({ limit: 8 }).then(r => r.data.data),             initialData: [] })
+  const { data: invData }   = useQuery({ queryKey: ['invoices-dash'],  queryFn: () => invoiceApi.list({ limit: 8, type: 'tax_invoice' }).then(r => r.data.data), initialData: [] })
   const { data: dnData }    = useQuery({ queryKey: ['dns-dash'],       queryFn: () => dnApi.list({ status: 'pending_invoice' }).then(r => r.data.data), initialData: [] })
   const { data: stockData } = useQuery({ queryKey: ['stock-low'],      queryFn: () => productApi.list({ low_stock: 'true' }).then(r => r.data.data),    initialData: [] })
   const { data: dash, isFetching } = useQuery({
@@ -42,8 +42,10 @@ export default function Dashboard() {
   const lowStock   = stockData || []
   const kd         = dash      || {}
 
-  const totalOutstand = invoices.filter(r => ['unpaid','overdue','partial'].includes(r.payment_status)).reduce((s, r) => s + parseFloat(r.balance_due || 0), 0)
-  const totalOverdue  = invoices.filter(r => r.payment_status === 'overdue').reduce((s, r) => s + parseFloat(r.balance_due || 0), 0)
+  // Use backend-computed AR totals (full dataset, not limited to 8)
+  const totalOutstand = parseFloat(kd.ar_outstanding  || 0)
+  const totalOverdue  = parseFloat(kd.ar_overdue_amount || 0)
+  const overdueCount  = parseInt(kd.ar_overdue_count  || 0)
   const pendingValue  = pendingDns.reduce((s, r) => s + parseFloat(r.net_value || 0), 0)
 
   // Chart data from backend
@@ -87,7 +89,7 @@ export default function Dashboard() {
       label: 'Overdue',
       value: `BHD ${fmtBhd(totalOverdue)}`,
       color: '#c62828',
-      sub: `${invoices.filter(r => r.payment_status === 'overdue').length} invoices`,
+      sub: `${overdueCount} invoices`,
       mod: 'invoices',
     },
     {

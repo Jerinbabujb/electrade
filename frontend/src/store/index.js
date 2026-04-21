@@ -109,13 +109,31 @@ export const useInvoiceFormStore = create((set, get) => ({
     items: s.form.items.filter((_, i) => i !== idx)
   }})),
 
-  // Computed totals
+  // Computed totals — VAT-compliant (Bahrain NBR Article 27)
+  // Overall/invoice discount is apportioned proportionally across lines,
+  // reducing the VAT base for each line before VAT is calculated.
   totals: () => {
-    const { items, shipping } = get().form
-    const subtotal     = items.reduce((s, i) => s + (Number(i.qty) * Number(i.unit_price)), 0)
-    const totalDisc    = items.reduce((s, i) => s + Number(i.discount || 0), 0)
-    const totalVat     = items.reduce((s, i) => s + ((Number(i.qty) * Number(i.unit_price) - Number(i.discount||0)) * Number(i.vat_rate) / 100), 0)
-    const grandTotal   = subtotal - totalDisc + totalVat + Number(shipping || 0)
+    const { items, shipping, invoice_discount } = get().form
+    const invDisc   = Number(invoice_discount || 0)
+
+    // Step 1: gross and line-discount per item
+    const subtotal  = items.reduce((s, i) => s + (Number(i.qty) * Number(i.unit_price)), 0)
+    const totalDisc = items.reduce((s, i) => s + Number(i.discount || 0), 0)
+    const netAfterLineDisc = subtotal - totalDisc   // taxable base before overall discount
+
+    // Step 2: apportion overall discount proportionally by each line's net value,
+    // then calculate VAT on the reduced taxable amount per line.
+    // This correctly handles mixed VAT rates.
+    let totalVat = 0
+    for (const i of items) {
+      const lineNet  = Number(i.qty) * Number(i.unit_price) - Number(i.discount || 0)
+      // share of the overall discount attributed to this line
+      const lineDiscShare = netAfterLineDisc > 0 ? invDisc * (lineNet / netAfterLineDisc) : 0
+      const lineTaxable   = lineNet - lineDiscShare
+      totalVat += lineTaxable * Number(i.vat_rate) / 100
+    }
+
+    const grandTotal = netAfterLineDisc - invDisc + totalVat + Number(shipping || 0)
     return { subtotal, totalDisc, totalVat, grandTotal }
   },
 }))

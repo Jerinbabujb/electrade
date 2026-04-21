@@ -38,7 +38,10 @@ export const invoiceApi = {
   void:          (id)        => api.delete(`/invoices/${id}`),
   addPayment:    (id, data)  => api.post(`/invoices/${id}/payments`, data),
   getPayments:   (id)        => api.get(`/invoices/${id}/payments`),
+  updatePayment: (id, pid, data) => api.put(`/invoices/${id}/payments/${pid}`, data),
+  deletePayment: (id, pid)   => api.delete(`/invoices/${id}/payments/${pid}`),
   getPdfUrl:     (id)        => `/api/v1/invoices/${id}/pdf?token=${localStorage.getItem('et_token')}`,
+  getPrintUrl:   (id)        => `/api/v1/invoices/${id}/print?token=${localStorage.getItem('et_token')}`,
   sendEmail:     (id, data)  => api.post(`/invoices/${id}/email`, data),
   sendReminder:  (id, data)  => api.post(`/invoices/${id}/reminder`, data),
   fromDNs:       (data)      => api.post('/invoices/from-dns', data),
@@ -62,6 +65,7 @@ export const dnApi = {
   toInvoice:    (id, data) => api.post(`/delivery-notes/${id}/to-invoice`, data),
   quoteFromDNs: (data)     => api.post('/delivery-notes/quote-from-dns', data),
   getPdfUrl:    (id)       => `/api/v1/delivery-notes/${id}/pdf?token=${localStorage.getItem('et_token')}`,
+  getPrintUrl:  (id)       => `/api/v1/delivery-notes/${id}/print?token=${localStorage.getItem('et_token')}`,
 }
 
 // ── Customers ──────────────────────────────────
@@ -84,6 +88,13 @@ export const productApi = {
   delete:      (id)      => api.delete(`/products/${id}`),
   stockHistory:(id)      => api.get(`/products/${id}/stock-history`),
   stockCount:  (data)    => api.post('/products/stock-count', data),
+  // Cycle count sessions
+  listSessions:       ()         => api.get('/products/count-sessions'),
+  createSession:      (data)     => api.post('/products/count-sessions', data),
+  getSession:         (id)       => api.get(`/products/count-sessions/${id}`),
+  saveSessionDraft:   (id, data) => api.put(`/products/count-sessions/${id}`, data),
+  applySession:       (id)       => api.post(`/products/count-sessions/${id}/apply`),
+  deleteSession:      (id)       => api.delete(`/products/count-sessions/${id}`),
 }
 
 // ── Categories ─────────────────────────────────
@@ -143,7 +154,9 @@ export const reportApi = {
   arAging:      ()       => api.get('/reports/ar-aging'),
   apAging:      ()       => api.get('/reports/ap-aging'),
   stock:              ()       => api.get('/reports/stock'),
-  statement:          (params) => api.get('/reports/statement', { params }),
+  statement:            (params) => api.get('/reports/statement', { params }),
+  statementPdfUrl:      (params) => `/api/v1/reports/statement/pdf?${new URLSearchParams({ ...params, token: localStorage.getItem('et_token') })}`,
+  statementPrintUrl:    (params) => `/api/v1/reports/statement/print?${new URLSearchParams({ ...params, token: localStorage.getItem('et_token') })}`,
   salesByProduct:     (params) => api.get('/reports/sales-by-product',  { params }),
   purchaseAnalysis:   (params) => api.get('/reports/purchase-analysis', { params }),
   inventoryAtDate:    (params) => api.get('/reports/inventory-at-date', { params }),
@@ -309,14 +322,18 @@ export const auditApi = {
 
 // ── Analytics ──────────────────────────────────
 export const analyticsApi = {
-  stockVelocity:    (params) => api.get('/analytics/stock-velocity',     { params }),
-  grossMargin:      (params) => api.get('/analytics/gross-margin',       { params }),
-  grossMarginDetail:(params) => api.get('/analytics/gross-margin/detail', { params }),
-  topCustomers:     (params) => api.get('/analytics/top-customers',      { params }),
-  supplierPricing:  (params) => api.get('/analytics/supplier-pricing',   { params }),
-  topProducts:      (params) => api.get('/analytics/top-products',       { params }),
-  salesTrend:       (params) => api.get('/analytics/sales-trend',        { params }),
-  deadStock:        (params) => api.get('/analytics/dead-stock',         { params }),
+  stockVelocity:      (params) => api.get('/analytics/stock-velocity',       { params }),
+  grossMargin:        (params) => api.get('/analytics/gross-margin',         { params }),
+  grossMarginDetail:  (params) => api.get('/analytics/gross-margin/detail',  { params }),
+  topCustomers:       (params) => api.get('/analytics/top-customers',        { params }),
+  supplierPricing:    (params) => api.get('/analytics/supplier-pricing',     { params }),
+  topProducts:        (params) => api.get('/analytics/top-products',         { params }),
+  salesTrend:         (params) => api.get('/analytics/sales-trend',          { params }),
+  deadStock:          (params) => api.get('/analytics/dead-stock',           { params }),
+  avgPriceTrend:      (params) => api.get('/analytics/avg-price-trend',      { params }),
+  reorderCandidates:  (params) => api.get('/analytics/reorder-candidates',   { params }),
+  buyPriceComparison: (params) => api.get('/analytics/buy-price-comparison', { params }),
+  costInflation:      (params) => api.get('/analytics/cost-inflation',       { params }),
 }
 
 // ── Auth ───────────────────────────────────────

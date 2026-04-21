@@ -325,14 +325,18 @@ r.get('/top-products', async (req, res, next) => {
     const from  = req.query.from  || new Date().getFullYear() + '-01-01'
     const to    = req.query.to    || new Date().toISOString().slice(0, 10)
     const limit = Math.min(200, parseInt(req.query.limit) || 20)
-    const sort  = ['revenue', 'qty', 'profit'].includes(req.query.sort) ? req.query.sort : 'revenue'
+    const sort  = ['revenue', 'qty', 'profit', 'margin_asc'].includes(req.query.sort) ? req.query.sort : 'revenue'
 
     const params = [co, from, to]
     const catFilter = req.query.category_id
       ? `AND p.category_id = $${params.push(req.query.category_id)}`
       : ''
 
-    const orderCol = sort === 'qty' ? 'qty_sold' : sort === 'profit' ? 'gross_profit' : 'net_revenue'
+    const orderClause = sort === 'margin_asc' ? 'margin_pct ASC NULLS LAST'
+                      : sort === 'qty'        ? 'qty_sold DESC'
+                      : sort === 'profit'     ? 'gross_profit DESC'
+                      :                         'net_revenue DESC'
+    const havingClause = sort === 'margin_asc' ? 'HAVING SUM(ii.net_amount::numeric) > 0' : ''
 
     const { rows } = await db.query(`
       SELECT
@@ -363,7 +367,8 @@ r.get('/top-products', async (req, res, next) => {
         AND i.invoice_date BETWEEN $2 AND $3
         ${catFilter}
       GROUP BY p.id, p.sku, p.name, cat.name
-      ORDER BY ${orderCol} DESC
+      ${havingClause}
+      ORDER BY ${orderClause}
       LIMIT $${params.push(limit)}
     `, params)
 
@@ -489,6 +494,255 @@ r.get('/dead-stock', async (req, res, next) => {
     }
 
     res.json({ data: rows, summary, period_days: days })
+  } catch (err) { next(err) }
+})
+
+// ── Avg Selling Price Trend (per product) ─────────────────────────────────────
+// ?product_id=<uuid>&from=YYYY-MM-DD&to=YYYY-MM-DD
+r.get('/avg-price-trend', async (req, res, next) => {
+  try {
+    const co         = req.user.company_id
+    const product_id = req.query.product_id
+    const from       = req.query.from || new Date().getFullYear() + '-01-01'
+    const to         = req.query.to   || new Date().toISOString().slice(0, 10)
+
+    // Return product meta always
+    const { rows: pRows } = await db.query(
+      `SELECT p.id, p.sku, p.name, p.price_1::numeric AS list_price, p.cost_price::numeric AS cost_price,
+              COALESCE(cat.name,'Uncategorised') AS category
+       FROM products p LEFT JOIN categories cat ON cat.id = p.category_id
+       WHERE p.company_id = $1 AND p.is_active = TRUE ORDER BY p.name LIMIT 500`,
+      [co]
+    )
+
+    if (!product_id) return res.json({ products: pRows, data: [], product: null })
+
+    const { rows: product } = await db.query(
+      `SELECT p.id, p.sku, p.name, p.price_1::numeric AS list_price, p.cost_price::numeric AS cost_price,
+              COALESCE(cat.name,'Uncategorised') AS category
+       FROM products p LEFT JOIN categories cat ON cat.id = p.category_id
+       WHERE p.id = $1 AND p.company_id = $2`,
+      [product_id, co]
+    )
+
+    const { rows } = await db.query(`
+      SELECT
+        date_trunc('month', i.invoice_date)::date        AS period_start,
+        to_char(i.invoice_date, 'YYYY-MM')               AS period_label,
+        ROUND(AVG(ii.unit_price::numeric), 3)            AS avg_sell_price,
+        ROUND(MIN(ii.unit_price::numeric), 3)            AS min_sell_price,
+        ROUND(MAX(ii.unit_price::numeric), 3)            AS max_sell_price,
+        ROUND(SUM(ii.qty::numeric), 3)                   AS qty_sold,
+        COUNT(DISTINCT ii.invoice_id)::int               AS invoice_count
+      FROM invoice_items ii
+      JOIN invoices i ON ii.invoice_id = i.id
+      WHERE i.company_id     = $1
+        AND i.type           = 'tax_invoice'
+        AND i.payment_status != 'void'
+        AND ii.product_id    = $2
+        AND i.invoice_date BETWEEN $3 AND $4
+      GROUP BY date_trunc('month', i.invoice_date), to_char(i.invoice_date, 'YYYY-MM')
+      ORDER BY period_start
+    `, [co, product_id, from, to])
+
+    res.json({ products: pRows, product: product[0] || null, data: rows, from, to })
+  } catch (err) { next(err) }
+})
+
+// ── Reorder Candidates (velocity-based) ───────────────────────────────────────
+// ?days=30&lead_time=14&category_id=<uuid>
+r.get('/reorder-candidates', async (req, res, next) => {
+  try {
+    const co        = req.user.company_id
+    const days      = Math.max(1, parseInt(req.query.days)      || 30)
+    const lead_time = Math.max(1, parseInt(req.query.lead_time) || 14)
+
+    const params    = [co, days, lead_time]
+    const catFilter = req.query.category_id
+      ? `AND p.category_id = $${params.push(req.query.category_id)}`
+      : ''
+
+    const { rows } = await db.query(`
+      WITH velocity AS (
+        SELECT
+          p.id, p.sku, p.name,
+          COALESCE(cat.name, 'Uncategorised')        AS category,
+          p.stock_qty::numeric                       AS stock_qty,
+          p.stock_min::numeric                       AS stock_min,
+          p.cost_price::numeric                      AS cost_price,
+          COALESCE(sold.qty_sold, 0)::numeric        AS qty_sold,
+          ROUND(COALESCE(sold.qty_sold, 0) / $2::numeric, 4) AS velocity_per_day
+        FROM products p
+        LEFT JOIN categories cat ON cat.id = p.category_id
+        LEFT JOIN (
+          SELECT ii.product_id, SUM(ii.qty::numeric) AS qty_sold
+          FROM invoice_items ii
+          JOIN invoices i
+            ON  i.id             = ii.invoice_id
+            AND i.company_id     = $1
+            AND i.type           = 'tax_invoice'
+            AND i.payment_status != 'void'
+            AND i.invoice_date  >= CURRENT_DATE - ($2::int * INTERVAL '1 day')
+          GROUP BY ii.product_id
+        ) sold ON sold.product_id = p.id
+        WHERE p.company_id     = $1
+          AND p.is_active       = TRUE
+          AND p.is_stock_tracked = TRUE
+          ${catFilter}
+      ),
+      scored AS (
+        SELECT *,
+          CASE WHEN velocity_per_day > 0
+            THEN ROUND(stock_qty / velocity_per_day)::int
+            ELSE NULL
+          END AS days_of_supply,
+          CASE WHEN velocity_per_day > 0
+            THEN GREATEST(0, ROUND(velocity_per_day * ($3::numeric + 14)))::int
+            ELSE GREATEST(0, ROUND(stock_min - stock_qty))::int
+          END AS suggested_reorder_qty
+        FROM velocity
+      )
+      SELECT * FROM scored
+      WHERE days_of_supply < $3::int
+         OR (stock_qty <= stock_min AND stock_min > 0)
+      ORDER BY days_of_supply ASC NULLS FIRST, stock_qty ASC
+      LIMIT 500
+    `, params)
+
+    res.json({ data: rows, period_days: days, lead_time_days: lead_time })
+  } catch (err) { next(err) }
+})
+
+// ── Buy Price Comparison (last vs avg) ────────────────────────────────────────
+// ?months=12&category_id=<uuid>&q=<search>
+r.get('/buy-price-comparison', async (req, res, next) => {
+  try {
+    const co     = req.user.company_id
+    const months = Math.max(1, parseInt(req.query.months) || 12)
+
+    const params  = [co, months]
+    const filters = []
+    if (req.query.category_id)
+      filters.push(`AND p.category_id = $${params.push(req.query.category_id)}`)
+    if (req.query.q)
+      filters.push(`AND (p.name ILIKE $${params.push('%' + req.query.q + '%')} OR p.sku ILIKE $${params.length})`)
+
+    const { rows } = await db.query(`
+      WITH last_buy AS (
+        SELECT DISTINCT ON (pi.product_id)
+          pi.product_id,
+          pi.unit_price::numeric           AS last_buy_price,
+          pur.purchase_date                AS last_buy_date,
+          c.name                           AS last_supplier
+        FROM purchase_items pi
+        JOIN purchases pur ON pur.id = pi.purchase_id AND pur.company_id = $1
+        JOIN customers  c  ON c.id  = pur.supplier_id
+        WHERE pi.product_id IS NOT NULL
+        ORDER BY pi.product_id, pur.purchase_date DESC, pur.created_at DESC
+      ),
+      avg_buy AS (
+        SELECT
+          pi.product_id,
+          ROUND(AVG(pi.unit_price::numeric), 3)    AS avg_buy_price,
+          ROUND(MIN(pi.unit_price::numeric), 3)    AS min_buy_price,
+          ROUND(MAX(pi.unit_price::numeric), 3)    AS max_buy_price,
+          COUNT(pi.id)::int                        AS buy_count,
+          ROUND(STDDEV(pi.unit_price::numeric), 3) AS price_stddev
+        FROM purchase_items pi
+        JOIN purchases pur ON pur.id = pi.purchase_id AND pur.company_id = $1
+          AND pur.purchase_date >= CURRENT_DATE - ($2::int * INTERVAL '1 month')
+        WHERE pi.product_id IS NOT NULL
+        GROUP BY pi.product_id
+      )
+      SELECT
+        p.id                                         AS product_id,
+        p.sku,
+        p.name                                       AS product_name,
+        COALESCE(cat.name, 'Uncategorised')          AS category,
+        p.cost_price::numeric                        AS current_cost_price,
+        lb.last_buy_price,
+        lb.last_buy_date,
+        lb.last_supplier,
+        ab.avg_buy_price,
+        ab.min_buy_price,
+        ab.max_buy_price,
+        ab.buy_count,
+        ab.price_stddev,
+        CASE WHEN ab.avg_buy_price > 0
+          THEN ROUND((lb.last_buy_price - ab.avg_buy_price) / ab.avg_buy_price * 100, 1)
+          ELSE 0
+        END                                          AS drift_from_avg_pct,
+        CASE WHEN p.cost_price > 0
+          THEN ROUND((lb.last_buy_price - p.cost_price) / p.cost_price * 100, 1)
+          ELSE 0
+        END                                          AS drift_from_master_pct
+      FROM products p
+      LEFT JOIN categories cat ON cat.id = p.category_id
+      JOIN last_buy lb ON lb.product_id = p.id
+      LEFT JOIN avg_buy ab ON ab.product_id = p.id
+      WHERE p.company_id = $1
+        AND p.is_active  = TRUE
+        ${filters.join(' ')}
+      ORDER BY ABS(COALESCE(
+        CASE WHEN ab.avg_buy_price > 0
+          THEN (lb.last_buy_price - ab.avg_buy_price) / ab.avg_buy_price * 100
+          ELSE 0 END, 0)) DESC
+      LIMIT 500
+    `, params)
+
+    res.json({ data: rows, months })
+  } catch (err) { next(err) }
+})
+
+// ── Cost Inflation (buy price trend per product) ───────────────────────────────
+// ?product_id=<uuid>&months=24
+r.get('/cost-inflation', async (req, res, next) => {
+  try {
+    const co         = req.user.company_id
+    const product_id = req.query.product_id
+    const months     = Math.max(1, parseInt(req.query.months) || 24)
+
+    // Always return product list for search
+    const { rows: pRows } = await db.query(
+      `SELECT p.id, p.sku, p.name, p.cost_price::numeric AS cost_price,
+              COALESCE(cat.name,'Uncategorised') AS category
+       FROM products p LEFT JOIN categories cat ON cat.id = p.category_id
+       JOIN (SELECT DISTINCT pi.product_id FROM purchase_items pi
+             JOIN purchases pur ON pur.id = pi.purchase_id AND pur.company_id = $1) ph
+         ON ph.product_id = p.id
+       WHERE p.company_id = $1 AND p.is_active = TRUE ORDER BY p.name LIMIT 500`,
+      [co]
+    )
+
+    if (!product_id) return res.json({ products: pRows, data: [], product: null })
+
+    const { rows: product } = await db.query(
+      `SELECT p.id, p.sku, p.name, p.cost_price::numeric AS cost_price,
+              COALESCE(cat.name,'Uncategorised') AS category
+       FROM products p LEFT JOIN categories cat ON cat.id = p.category_id
+       WHERE p.id = $1 AND p.company_id = $2`,
+      [product_id, co]
+    )
+
+    const { rows } = await db.query(`
+      SELECT
+        date_trunc('month', pur.purchase_date)::date     AS period_start,
+        to_char(pur.purchase_date, 'YYYY-MM')            AS period_label,
+        ROUND(AVG(pi.unit_price::numeric), 3)            AS avg_buy_price,
+        ROUND(MIN(pi.unit_price::numeric), 3)            AS min_buy_price,
+        ROUND(MAX(pi.unit_price::numeric), 3)            AS max_buy_price,
+        COUNT(pi.id)::int                                AS buy_count,
+        STRING_AGG(DISTINCT c.name, ', ')                AS suppliers
+      FROM purchase_items pi
+      JOIN purchases pur ON pur.id = pi.purchase_id AND pur.company_id = $1
+      JOIN customers  c  ON c.id  = pur.supplier_id
+      WHERE pi.product_id = $2
+        AND pur.purchase_date >= CURRENT_DATE - ($3::int * INTERVAL '1 month')
+      GROUP BY date_trunc('month', pur.purchase_date), to_char(pur.purchase_date, 'YYYY-MM')
+      ORDER BY period_start
+    `, [co, product_id, months])
+
+    res.json({ products: pRows, product: product[0] || null, data: rows, months })
   } catch (err) { next(err) }
 })
 

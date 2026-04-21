@@ -1,5 +1,6 @@
 FROM node:20-alpine
-RUN apk add --no-cache postgresql16-client
+RUN apk add --no-cache postgresql16-client chromium
+ENV CHROMIUM_PATH=/usr/bin/chromium-browser
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev

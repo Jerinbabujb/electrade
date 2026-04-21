@@ -34,8 +34,9 @@ export default function DNModal() {
 
   // ── All hooks must be called unconditionally (Rules of Hooks) ──
 
-  const [form, setForm]     = useState(emptyForm)
-  const [showProd, setShowProd] = useState(false)
+  const [form, setForm]       = useState(emptyForm)
+  const [showProd, setShowProd]   = useState(false)
+  const [shortfalls, setShortfalls] = useState(null)  // stock shortfall confirmation state
   const F = (k, v) => setForm(f => ({ ...f, [k]: v }))
 
   // Load existing DN for view mode
@@ -75,40 +76,61 @@ export default function DNModal() {
     })
   }, [sourceDoc])
 
+  const doSave = (forceOverstock = false) => {
+    if (isConvert) {
+      return convertApi.convert({
+        from_id:   fromInvoiceId,
+        from_type: 'invoice',
+        to_type:   'delivery_note',
+        overrides: {
+          dn_date:          form.dn_date,
+          project_ref:      form.project_ref,
+          po_reference:     form.po_reference,
+          delivery_address: form.delivery_address,
+          delivered_by:     form.delivered_by,
+          notes:            form.notes,
+          force_overstock:  forceOverstock,
+          items: form.items.map(it => ({
+            product_id:    it.product_id || null,
+            part_no:       it.part_no,
+            description:   it.description,
+            qty_ordered:   parseFloat(it.qty_ordered),
+            qty_delivered: parseFloat(it.qty_delivered),
+            unit:          it.unit,
+            unit_price:    parseFloat(it.unit_price),
+          })),
+        },
+      })
+    }
+    return dnApi.create({ ...form, force_overstock: forceOverstock })
+  }
+
   const saveMut = useMutation({
-    mutationFn: () => {
-      if (isConvert) {
-        return convertApi.convert({
-          from_id:   fromInvoiceId,
-          from_type: 'invoice',
-          to_type:   'delivery_note',
-          overrides: {
-            dn_date:          form.dn_date,
-            project_ref:      form.project_ref,
-            po_reference:     form.po_reference,
-            delivery_address: form.delivery_address,
-            delivered_by:     form.delivered_by,
-            notes:            form.notes,
-            items: form.items.map(it => ({
-              product_id:    it.product_id || null,
-              part_no:       it.part_no,
-              description:   it.description,
-              qty_ordered:   parseFloat(it.qty_ordered),
-              qty_delivered: parseFloat(it.qty_delivered),
-              unit:          it.unit,
-              unit_price:    parseFloat(it.unit_price),
-            })),
-          },
-        })
-      }
-      return dnApi.create(form)
-    },
+    mutationFn: () => doSave(false),
     onSuccess: (res) => {
       const dn = res.data.data
-      toast.success(`${dn.dn_no} created — stock deducted`)
+      toast.success(res.data.message || `${dn.dn_no} created — stock deducted`)
       qc.invalidateQueries(['dns'])
       qc.invalidateQueries(['products'])
       if (isConvert) qc.invalidateQueries(['quotations'])
+      closeModal('dn')
+    },
+    onError: (err) => {
+      if (err.response?.data?.code === 'STOCK_SHORTFALL') {
+        setShortfalls(err.response.data.shortfalls)  // show confirmation dialog
+      }
+    },
+  })
+
+  const confirmOverstockMut = useMutation({
+    mutationFn: () => doSave(true),
+    onSuccess: (res) => {
+      const dn = res.data.data
+      toast.success(res.data.message || `${dn.dn_no} created`)
+      qc.invalidateQueries(['dns'])
+      qc.invalidateQueries(['products'])
+      if (isConvert) qc.invalidateQueries(['quotations'])
+      setShortfalls(null)
       closeModal('dn')
     },
   })
@@ -161,7 +183,8 @@ export default function DNModal() {
           <DocTrail docId={existingDnId} />
 
           <div className="modal-toolbar">
-            <button className="btn" onClick={() => window.open(dnApi.getPdfUrl(existingDnId), '_blank')}>📄 Print DN</button>
+            <button className="btn" onClick={() => window.open(dnApi.getPdfUrl(existingDnId), '_blank')}>📄 PDF DN</button>
+            <button className="btn" onClick={() => window.open(dnApi.getPrintUrl(existingDnId), '_blank')}>🖨 Print DN</button>
             <div className="toolbar-sep"/>
             <button className="btn" onClick={() => closeModal('dn')}>Close</button>
           </div>
@@ -365,9 +388,12 @@ export default function DNModal() {
                     </td></tr>
                   )}
                   {!loadingSrc && form.items.map((it, idx) => (
-                    <tr key={it._id}>
-                      <td style={{ textAlign:'center', color:'#888' }}>{idx + 1}</td>
-                      <td><input value={it.part_no || ''} onChange={e => updItem(idx, 'part_no', e.target.value)} placeholder="SKU"/></td>
+                    <tr key={it._id} style={{ background: !it.product_id ? '#fffdf0' : undefined }}>
+                      <td style={{ textAlign:'center', color:'#888' }}>
+                        {idx + 1}
+                        {!it.product_id && <div style={{ fontSize:9, color:'#aaa', lineHeight:1 }}>free</div>}
+                      </td>
+                      <td><input value={it.part_no || ''} onChange={e => updItem(idx, 'part_no', e.target.value)} placeholder="Part No."/></td>
                       <td><input value={it.description || ''} onChange={e => updItem(idx, 'description', e.target.value)}
                         placeholder="Description" style={{ width:'100%' }}/></td>
                       <td>
@@ -403,7 +429,11 @@ export default function DNModal() {
                   )}
                 </tbody>
               </table>
-              <button className="add-item-btn" onClick={() => setShowProd(true)}>＋ Add Item</button>
+              <div style={{ display:'flex', gap:6, marginTop:4 }}>
+                <button className="add-item-btn" onClick={() => setShowProd(true)}>＋ Pick from Catalog</button>
+                <button className="add-item-btn" style={{ background:'#fff8e1', borderColor:'#ffe082', color:'#5d4037' }}
+                  onClick={() => addItem()}>✎ Free Text Line</button>
+              </div>
             </div>
 
             <div style={{ background:'#fff8e1', borderTop:'1px solid #ffe082', padding:'7px 12px', fontSize:12, color:'#5d4037' }}>
@@ -428,6 +458,57 @@ export default function DNModal() {
       </div>
 
       {showProd && <ProductPickerModal onSelect={addItem} onClose={() => setShowProd(false)}/>}
+
+      {/* Stock Shortfall Confirmation Dialog */}
+      {shortfalls && (
+        <div className="modal-overlay" style={{ zIndex: 1200 }} onClick={e => e.target === e.currentTarget && setShortfalls(null)}>
+          <div className="modal modal-sm" style={{ maxWidth: 480 }}>
+            <div className="modal-header" style={{ background:'#e65100', color:'#fff' }}>
+              <h3>⚠ Stock Shortfall — Confirm Backorder</h3>
+              <button className="close-btn" onClick={() => setShortfalls(null)} style={{ color:'#fff' }}>✕</button>
+            </div>
+            <div className="modal-body" style={{ padding: 16 }}>
+              <p style={{ fontSize: 13, marginBottom: 12, color: '#555' }}>
+                The following items exceed available stock. You can still create this DN — stock will go negative
+                and must be replenished via a Purchase Order before or after delivery.
+              </p>
+              <table className="data-table" style={{ fontSize: 12, marginBottom: 14 }}>
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th style={{ textAlign:'right' }}>Available</th>
+                    <th style={{ textAlign:'right' }}>Requested</th>
+                    <th style={{ textAlign:'right' }}>Shortfall</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shortfalls.map((s, i) => (
+                    <tr key={i}>
+                      <td style={{ fontWeight: 600 }}>{s.name}</td>
+                      <td style={{ textAlign:'right', color: s.available <= 0 ? '#c62828' : '#e65100' }}>{s.available}</td>
+                      <td style={{ textAlign:'right' }}>{s.requested}</td>
+                      <td style={{ textAlign:'right', color:'#c62828', fontWeight: 700 }}>−{s.shortfall}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ background:'#fff8e1', border:'1px solid #ffe082', borderRadius:4, padding:'8px 12px', fontSize:11, color:'#5d4037' }}>
+                💡 After confirming, go to <strong>Purchases</strong> to create a Purchase Order for the shortfall.
+                Receiving the PO will bring stock back to positive.
+              </div>
+            </div>
+            <div style={{ padding:'10px 16px', borderTop:'1px solid #e0e0e0', display:'flex', gap:8 }}>
+              <button className="btn"
+                style={{ background:'#e65100', color:'#fff', borderColor:'#bf360c' }}
+                onClick={() => confirmOverstockMut.mutate()}
+                disabled={confirmOverstockMut.isPending}>
+                {confirmOverstockMut.isPending ? '⏳ Creating…' : '✓ Confirm — Create DN (Backorder)'}
+              </button>
+              <button className="btn" onClick={() => setShortfalls(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

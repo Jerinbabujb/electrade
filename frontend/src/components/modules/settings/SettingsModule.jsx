@@ -653,6 +653,7 @@ function CompanyUsersPanel({ company, currentUserId }) {
 
 function CompaniesTab({ currentUserId }) {
   const qc = useQueryClient()
+  const { switchCompany } = useAuthStore()
   const [expanded, setExpanded] = useState(null)
   const [showNew, setShowNew] = useState(false)
   const [newCo, setNewCo] = useState({ name: '', cr_number: '', vat_number: '', default_vat_rate: 10, default_currency: 'BHD' })
@@ -665,11 +666,14 @@ function CompaniesTab({ currentUserId }) {
 
   const createMut = useMutation({
     mutationFn: () => companyApi.create(newCo),
-    onSuccess: () => {
-      toast.success('Company created')
-      qc.invalidateQueries(['all-companies'])
+    onSuccess: async (res) => {
+      const newId = res.data.data?.id
+      toast.success('Company created — switching to it now…')
       setNewCo({ name: '', cr_number: '', vat_number: '', default_vat_rate: 10, default_currency: 'BHD' })
       setShowNew(false)
+      // Switch to the new company so the auth token includes it and
+      // all settings (logo, config) are applied to the correct company.
+      if (newId) await switchCompany(newId, qc)
     },
   })
 
@@ -851,6 +855,163 @@ export default function SettingsModule() {
               <div className="field"><label>SWIFT / BIC</label><input value={form.bank_swift||''} onChange={e=>F('bank_swift',e.target.value)}/></div>
             </div>
             <button className="btn primary" onClick={()=>saveCo.mutate()} disabled={saveCo.isPending}>💾 {saveCo.isPending?'Saving...':'Save Company Settings'}</button>
+
+            {/* Module Visibility */}
+            <div style={{marginTop:24,paddingTop:16,borderTop:'1px solid #e0e0e0'}}>
+              <div style={{fontSize:13,fontWeight:700,marginBottom:4,color:'#333'}}>Module Visibility</div>
+              <div style={{fontSize:11,color:'#888',marginBottom:12}}>
+                Hide modules not used by this company. Applies to all users regardless of role.
+                Core modules (Delivery Notes, Invoices, Products, Customers) cannot be hidden.
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:6}}>
+                {[
+                  { id:'quotations',      label:'Quotations' },
+                  { id:'suppliers',       label:'Suppliers' },
+                  { id:'purchase-orders', label:'Purchase Orders' },
+                  { id:'purchases',       label:'Purchase Invoices' },
+                  { id:'shipments',       label:'Landed Costs' },
+                  { id:'crm',             label:'Pipeline (CRM)' },
+                  { id:'hr',              label:'HR & Payroll' },
+                  { id:'tasks',           label:'Tasks' },
+                  { id:'contra',          label:'Contra Accounts' },
+                  { id:'finance',         label:'Fin. Overview' },
+                  { id:'cheques',         label:'Cheque Register' },
+                  { id:'expenses',        label:'Expenses' },
+                  { id:'bank',            label:'Bank Recon.' },
+                  { id:'analytics',       label:'Analytics' },
+                  { id:'reports',         label:'Reports' },
+                ].map(({ id, label }) => {
+                  const hidden = (form.hidden_modules || []).includes(id)
+                  return (
+                    <label key={id} style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:'pointer',
+                      padding:'5px 8px',borderRadius:3,border:'1px solid #e0e0e0',
+                      background: hidden ? '#fff8f8' : '#f9f9f9',
+                      color: hidden ? '#c62828' : '#333'}}>
+                      <input type="checkbox" checked={!hidden}
+                        onChange={e => {
+                          const current = form.hidden_modules || []
+                          F('hidden_modules', e.target.checked
+                            ? current.filter(m => m !== id)
+                            : [...current, id])
+                        }}/>
+                      {hidden ? '🚫' : '✓'} {label}
+                    </label>
+                  )
+                })}
+              </div>
+              <div style={{marginTop:10}}>
+                <button className="btn primary" onClick={()=>saveCo.mutate()} disabled={saveCo.isPending}>
+                  💾 {saveCo.isPending?'Saving...':'Save Visibility Settings'}
+                </button>
+              </div>
+            </div>
+
+            {/* PDF Layout */}
+            {(() => {
+              const pdfS = form.pdf_settings || {}
+              const Fpdf = (k, v) => F('pdf_settings', { ...(form.pdf_settings || {}), [k]: v })
+              const chkStyle = (on) => ({
+                display:'flex', alignItems:'center', gap:7, fontSize:12, cursor:'pointer',
+                padding:'5px 8px', borderRadius:3, border:'1px solid #e0e0e0',
+                background: on ? '#f9f9f9' : '#fff8f8', color: on ? '#333' : '#c62828',
+              })
+              return (
+                <div style={{marginTop:24,paddingTop:16,borderTop:'1px solid #e0e0e0'}}>
+                  <div style={{fontSize:13,fontWeight:700,marginBottom:4,color:'#333'}}>PDF Layout</div>
+                  <div style={{fontSize:11,color:'#888',marginBottom:14}}>
+                    Customize how invoices, quotations, and delivery notes are printed.
+                  </div>
+
+                  {/* Template */}
+                  <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:8}}>Template Style</div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:18}}>
+                    {[
+                      { id:'clean',   icon:'📄', label:'Clean',   desc:'Modern, minimal, white background' },
+                      { id:'classic', icon:'🏢', label:'Classic',  desc:'Colored header bar, traditional look' },
+                      { id:'compact', icon:'📋', label:'Compact',  desc:'Smaller text, fits more line items' },
+                    ].map(({ id, icon, label, desc }) => {
+                      const active = (pdfS.template || 'clean') === id
+                      return (
+                        <div key={id} onClick={() => Fpdf('template', id)} style={{
+                          border:`2px solid ${active?'var(--blue)':'#ddd'}`,
+                          borderRadius:4, padding:'10px 12px', cursor:'pointer',
+                          background: active ? 'var(--blue-light)' : '#fafafa', textAlign:'center',
+                        }}>
+                          <div style={{fontSize:22,marginBottom:4}}>{icon}</div>
+                          <div style={{fontSize:12,fontWeight:700,color:active?'var(--blue)':'#333'}}>{label}</div>
+                          <div style={{fontSize:10,color:'#888',marginTop:3,lineHeight:1.4}}>{desc}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {/* Language */}
+                  <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:8}}>Document Language</div>
+                  <div style={{display:'flex',gap:8,marginBottom:18}}>
+                    {[['bilingual','Bilingual (EN + Arabic)'],['en','English Only']].map(([val, lbl]) => {
+                      const active = (pdfS.language || 'bilingual') === val
+                      return (
+                        <label key={val} style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',
+                          padding:'6px 14px',border:`1px solid ${active?'var(--blue)':'#ddd'}`,borderRadius:3,
+                          background:active?'var(--blue-light)':'#fafafa'}}>
+                          <input type="radio" name="pdf_lang" checked={active} onChange={() => Fpdf('language', val)}/>
+                          {lbl}
+                        </label>
+                      )
+                    })}
+                  </div>
+
+                  {/* Columns */}
+                  <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:8}}>Table Columns</div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6,marginBottom:18}}>
+                    {[
+                      ['show_part_no',  'Part No. column'],
+                      ['show_unit',     'Unit column'],
+                      ['show_discount', 'Discount column (when items have discounts)'],
+                      ['show_vat_col',  'VAT% column'],
+                    ].map(([key, label]) => {
+                      const on = pdfS[key] !== false
+                      return (
+                        <label key={key} style={chkStyle(on)}>
+                          <input type="checkbox" checked={on} onChange={e => Fpdf(key, e.target.checked)}/>
+                          {on ? '✓' : '🚫'} {label}
+                        </label>
+                      )
+                    })}
+                  </div>
+
+                  {/* Sections */}
+                  <div style={{fontSize:11,fontWeight:600,color:'#555',marginBottom:8}}>Document Sections</div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6,marginBottom:18}}>
+                    {[
+                      ['show_bank',         'Payment / bank details'],
+                      ['show_balance_due',  'Balance Due row'],
+                      ['show_signatures',   'Signature boxes (Delivery Notes)'],
+                    ].map(([key, label]) => {
+                      const on = pdfS[key] !== false
+                      return (
+                        <label key={key} style={chkStyle(on)}>
+                          <input type="checkbox" checked={on} onChange={e => Fpdf(key, e.target.checked)}/>
+                          {on ? '✓' : '🚫'} {label}
+                        </label>
+                      )
+                    })}
+                  </div>
+
+                  {/* Custom footer */}
+                  <div className="field" style={{marginBottom:14}}>
+                    <label>Custom Footer Text <span style={{fontWeight:400,color:'#999'}}>(optional — overrides the default legal line)</span></label>
+                    <input value={pdfS.custom_footer || ''}
+                      placeholder="e.g. All sales are final · جميع المبيعات نهائية"
+                      onChange={e => Fpdf('custom_footer', e.target.value)}/>
+                  </div>
+
+                  <button className="btn primary" onClick={() => saveCo.mutate()} disabled={saveCo.isPending}>
+                    💾 {saveCo.isPending ? 'Saving...' : 'Save PDF Settings'}
+                  </button>
+                </div>
+              )
+            })()}
           </div>
         )}
 

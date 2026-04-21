@@ -81,11 +81,11 @@ export default function InvoicesModule() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])
 
+  const rows      = resp?.data  || []
+
   const overdueSelected = rows.filter(r =>
     selectedIds.includes(r.id) && ['unpaid', 'partial', 'overdue'].includes(r.payment_status) && r.due_date && new Date(r.due_date) < new Date()
   )
-
-  const rows      = resp?.data  || []
   const totalRows = resp?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize))
 
@@ -137,6 +137,10 @@ export default function InvoicesModule() {
         <button className="btn" onClick={() => primaryId && window.open(invoiceApi.getPdfUrl(primaryId), '_blank')}
           disabled={!primaryId}>
           <span className="btn-icon">📄</span> PDF
+        </button>
+        <button className="btn" onClick={() => primaryId && window.open(invoiceApi.getPrintUrl(primaryId), '_blank')}
+          disabled={!primaryId}>
+          <span className="btn-icon">🖨</span> Print
         </button>
         <button className="btn" onClick={() => primaryId && openModal('payment', { invoiceId: primaryId })}
           disabled={!primaryId}>

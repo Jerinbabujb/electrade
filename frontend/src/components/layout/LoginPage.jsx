@@ -46,7 +46,7 @@ export default function LoginPage() {
           }}>E</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--blue)' }}>ElecTrade Pro</div>
           <div style={{ fontSize: 12, color: 'var(--gray-dark)', marginTop: 2 }}>
-            Al Manama Electrical Trading Co. W.L.L
+            Business Management Platform
           </div>
         </div>
 
@@ -79,7 +79,7 @@ export default function LoginPage() {
       </div>
 
       <div style={{ fontSize: 11, color: '#aaa', marginTop: 16 }}>
-        ElecTrade Pro v1.0 — Powered by Al Manama Electrical
+        ElecTrade Pro v1.0 — Powered by Haspex Co. W.L.L
       </div>
     </div>
   )

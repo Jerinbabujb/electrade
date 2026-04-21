@@ -15,10 +15,13 @@ router.delete('/:id',                 authorize('admin'),               ctrl.voi
 router.post  ('/:id/write-off',       authorize('admin'),               ctrl.writeOff);
 router.delete('/:id/write-off',       authorize('admin'),               ctrl.reverseWriteOff);
 router.get   ('/:id/pdf',             ctrl.getPdf);
+router.get   ('/:id/print',           ctrl.getPrint);
 router.post  ('/:id/email',           authorize('admin','sales'),       ctrl.sendEmail);
 router.post  ('/:id/reminder',        authorize('admin','sales'),       ctrl.sendReminder);
 router.post  ('/:id/payments',        authorize('admin','sales','accountant'), ctrl.addPayment);
 router.get   ('/:id/payments',        ctrl.getPayments);
+router.put   ('/:id/payments/:paymentId', authorize('admin','sales','accountant'), ctrl.updatePayment);
+router.delete('/:id/payments/:paymentId', authorize('admin','sales','accountant'), ctrl.deletePayment);
 
 // Consolidate multiple DNs into one invoice
 router.post  ('/from-dns',            authorize('admin','sales'),       ctrl.createFromDNs);

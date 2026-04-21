@@ -1,4 +1,5 @@
-const db = require('../db');
+const db     = require('../db');
+const pdfSvc = require('../services/pdfService');
 
 // ── VAT Report — Bahrain NBR format ───────────────────────
 exports.vatReport = async (req, res, next) => {
@@ -286,6 +287,7 @@ exports.statement = async (req, res, next) => {
          ), 0)                                                                  AS total_paid
        FROM invoices i
        WHERE i.customer_id = $1 AND i.company_id = $2
+         AND i.type IN ('tax_invoice', 'credit_note')
          AND i.payment_status != 'void' AND i.invoice_date < $3`,
       [customer_id, co_id, from]);
 
@@ -311,6 +313,7 @@ exports.statement = async (req, res, next) => {
           i.notes          AS notes
         FROM invoices i
         WHERE i.customer_id = $1 AND i.company_id = $2
+          AND i.type IN ('tax_invoice', 'credit_note')
           AND i.payment_status != 'void'
           AND i.invoice_date BETWEEN $3 AND $4
 
@@ -362,6 +365,115 @@ exports.statement = async (req, res, next) => {
       }
     });
   } catch (err) { next(err); }
+};
+
+// ── Statement PDF ──────────────────────────────────────────
+async function buildStatementData(req) {
+  const { customer_id, from, to } = req.query;
+  const co_id = req.user.company_id;
+
+  if (!customer_id) throw Object.assign(new Error('customer_id required'), { status: 400 });
+  if (!from || !to)  throw Object.assign(new Error('from and to dates required'), { status: 400 });
+
+  const { rows: [customer] } = await db.query(
+    `SELECT id, code, name, address, tel, email, vat_number, payment_terms_days
+     FROM customers WHERE id = $1 AND company_id = $2`,
+    [customer_id, co_id]);
+  if (!customer) throw Object.assign(new Error('Customer not found'), { status: 404 });
+
+  const { rows: [company] } = await db.query(
+    `SELECT name, name_ar, cr_number, vat_number, address, tel, email,
+            bank_name, bank_acct_name, bank_iban, bank_swift, theme_color
+     FROM companies WHERE id = $1`, [co_id]);
+
+  const { rows: [ob] } = await db.query(
+    `SELECT
+       COALESCE(SUM(i.grand_total), 0) AS total_invoiced,
+       COALESCE((
+         SELECT SUM(p.amount) FROM payments p
+         JOIN   invoices pi ON pi.id = p.reference_id
+         WHERE  pi.customer_id = $1 AND pi.company_id = $2
+           AND  p.reference_type = 'invoice' AND p.payment_date < $3
+       ), 0) AS total_paid
+     FROM invoices i
+     WHERE i.customer_id = $1 AND i.company_id = $2
+       AND i.type IN ('tax_invoice', 'credit_note')
+       AND i.payment_status != 'void' AND i.invoice_date < $3`,
+    [customer_id, co_id, from]);
+
+  const openingBalance = parseFloat(ob.total_invoiced) - parseFloat(ob.total_paid);
+
+  const { rows: txns } = await db.query(
+    `SELECT * FROM (
+      SELECT i.invoice_date AS txn_date, i.created_at AS sort_ts,
+        CASE i.type WHEN 'credit_note' THEN 'credit_note' ELSE 'invoice' END AS txn_type,
+        i.invoice_no AS ref_no, i.type::text AS doc_type,
+        CASE WHEN i.type = 'credit_note' THEN 0 ELSE i.grand_total END AS debit,
+        CASE WHEN i.type = 'credit_note' THEN i.grand_total ELSE 0  END AS credit,
+        i.id AS ref_id, i.notes AS notes
+      FROM invoices i
+      WHERE i.customer_id = $1 AND i.company_id = $2
+        AND i.type IN ('tax_invoice', 'credit_note')
+        AND i.payment_status != 'void'
+        AND i.invoice_date BETWEEN $3 AND $4
+      UNION ALL
+      SELECT p.payment_date AS txn_date, p.created_at AS sort_ts,
+        'payment' AS txn_type,
+        COALESCE(p.reference_no, 'Payment') AS ref_no,
+        p.method::text AS doc_type, 0 AS debit, p.amount AS credit,
+        p.id AS ref_id, p.notes AS notes
+      FROM payments p
+      JOIN invoices i ON i.id = p.reference_id
+      WHERE i.customer_id = $1 AND p.company_id = $2
+        AND p.reference_type = 'invoice'
+        AND p.payment_date BETWEEN $3 AND $4
+    ) t ORDER BY txn_date, sort_ts`,
+    [customer_id, co_id, from, to]);
+
+  let balance = openingBalance;
+  const rows = txns.map(r => {
+    balance += parseFloat(r.debit) - parseFloat(r.credit);
+    return { ...r, balance: parseFloat(balance.toFixed(3)) };
+  });
+
+  const totalDebit   = rows.reduce((s, r) => s + parseFloat(r.debit),  0);
+  const totalCredit  = rows.reduce((s, r) => s + parseFloat(r.credit), 0);
+  const closingBalance = openingBalance + totalDebit - totalCredit;
+
+  return {
+    customer, company,
+    period:          { from, to },
+    opening_balance: parseFloat(openingBalance.toFixed(3)),
+    rows,
+    totals: { debit: parseFloat(totalDebit.toFixed(3)), credit: parseFloat(totalCredit.toFixed(3)) },
+    closing_balance: parseFloat(closingBalance.toFixed(3)),
+  };
+}
+
+exports.statementPdf = async (req, res, next) => {
+  try {
+    const data = await buildStatementData(req);
+    const pdf  = await pdfSvc.generateStatementPdf(data);
+    const name = `Statement-${data.customer.code || data.customer.name}-${data.period.from}-${data.period.to}.pdf`;
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${name}"`);
+    res.send(pdf);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: { message: err.message } });
+    next(err);
+  }
+};
+
+exports.statementPrint = async (req, res, next) => {
+  try {
+    const data = await buildStatementData(req);
+    const html = pdfSvc.statementPrintHtml(data);
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: { message: err.message } });
+    next(err);
+  }
 };
 
 // ── Dashboard Summary ─────────────────────────────────────
@@ -422,6 +534,7 @@ exports.dashboard = async (req, res, next) => {
       { rows: [stockRow] },
       { rows: chartRows },
       { rows: catSales },
+      { rows: [arRow] },
     ] = await Promise.all([
       // VAT output
       db.query(
@@ -499,6 +612,15 @@ exports.dashboard = async (req, res, next) => {
            AND i.invoice_date BETWEEN $2 AND $3
          GROUP BY 1 ORDER BY total DESC LIMIT 5`,
         [co_id, from, to]),
+      // True AR outstanding — all unpaid/partial/overdue tax invoices (no date filter, point-in-time)
+      db.query(
+        `SELECT COALESCE(SUM(balance_due), 0) AS outstanding,
+                COUNT(*) FILTER (WHERE payment_status = 'overdue') AS overdue_count,
+                COALESCE(SUM(balance_due) FILTER (WHERE payment_status = 'overdue'), 0) AS overdue_amount
+         FROM invoices
+         WHERE company_id=$1 AND type='tax_invoice'
+           AND payment_status IN ('unpaid','partial','overdue')`,
+        [co_id]),
     ]);
 
     const rev       = parseFloat(revRow.v);
@@ -517,6 +639,9 @@ exports.dashboard = async (req, res, next) => {
         margin_pct:          marginPct,
         stock_value:         parseFloat(stockRow.v).toFixed(3),
         stock_product_count: parseInt(stockRow.with_stock),
+        ar_outstanding:      parseFloat(arRow.outstanding).toFixed(3),
+        ar_overdue_count:    parseInt(arRow.overdue_count),
+        ar_overdue_amount:   parseFloat(arRow.overdue_amount).toFixed(3),
         sales_chart: chartRows.map(r => ({
           label: r.label,
           total: parseFloat(r.total),

@@ -11,5 +11,6 @@ router.get   ('/:id',              ctrl.getOne);
 router.put   ('/:id/cancel',       authorize('admin'),                       ctrl.cancel);
 router.post  ('/:id/to-invoice',   authorize('admin','sales'),               ctrl.convertToInvoice);
 router.get   ('/:id/pdf',          ctrl.getPdf);
+router.get   ('/:id/print',        ctrl.getPrint);
 
 module.exports = router;

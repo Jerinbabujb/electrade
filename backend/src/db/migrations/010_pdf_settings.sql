@@ -1,0 +1,1 @@
+ALTER TABLE companies ADD COLUMN IF NOT EXISTS pdf_settings JSONB NOT NULL DEFAULT '{}';

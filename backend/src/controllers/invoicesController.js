@@ -4,6 +4,32 @@ const emailSvc = require('../services/emailService');
 const { v4: uuid } = require('uuid');
 const audit = require('../utils/auditLog');
 
+// ── VAT-compliant totals calculator (Bahrain NBR Article 27) ─
+// Overall/invoice discount apportioned proportionally across lines,
+// reducing each line's taxable base before VAT is applied.
+function calcTotals(items, invDisc, shipping) {
+  invDisc  = Number(invDisc)  || 0;
+  shipping = Number(shipping) || 0;
+
+  const lineNets = items.map(i =>
+    Number(i.qty) * Number(i.unit_price) - Number(i.discount || 0));
+  const netAfterLineDisc = lineNets.reduce((s, n) => s + n, 0);
+
+  let total_vat = 0;
+  for (let i = 0; i < items.length; i++) {
+    const lineNet       = lineNets[i];
+    const discShare     = netAfterLineDisc > 0 ? invDisc * (lineNet / netAfterLineDisc) : 0;
+    const lineTaxable   = lineNet - discShare;
+    total_vat += lineTaxable * Number(items[i].vat_rate) / 100;
+  }
+
+  const subtotal       = netAfterLineDisc;                         // net after line discounts
+  const total_discount = items.reduce((s, i) => s + Number(i.discount || 0), 0) + invDisc;
+  const grand_total    = netAfterLineDisc - invDisc + total_vat + shipping;
+
+  return { subtotal, total_discount, total_vat, grand_total };
+}
+
 // ── Build shared WHERE clause for invoice filters ─────────
 function buildInvoiceWhere(query, companyId) {
   const { status, customer_id, type, from, to, due_from, due_to, q } = query;
@@ -153,11 +179,7 @@ exports.create = async (req, res, next) => {
          WHERE id = $1 RETURNING ${prefixCol} AS prefix, ${seqCol} - 1 AS seq`, [req.user.company_id]);
       const invoice_no = `${co.prefix}-${new Date().getFullYear()}-${String(co.seq).padStart(4,'0')}`;
 
-      const invDisc      = Number(invoice_discount) || 0;
-      const subtotal     = items.reduce((s, i) => s + (Number(i.qty) * Number(i.unit_price) - Number(i.discount||0)), 0);
-      const total_discount = items.reduce((s, i) => s + Number(i.discount||0), 0) + invDisc;
-      const total_vat    = items.reduce((s, i) => s + ((Number(i.qty) * Number(i.unit_price) - Number(i.discount||0)) * Number(i.vat_rate) / 100), 0);
-      const grand_total  = subtotal - invDisc + total_vat + Number(shipping);
+      const { subtotal, total_discount, total_vat, grand_total } = calcTotals(items, invoice_discount, shipping);
 
       const { rows: [inv] } = await client.query(
         `INSERT INTO invoices (id, company_id, invoice_no, type, customer_id, invoice_date, due_date,
@@ -166,7 +188,7 @@ exports.create = async (req, res, next) => {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::invoice_status,$18) RETURNING *`,
         [uuid(), req.user.company_id, invoice_no, type, customer_id, invoice_date || new Date(),
          due_date, po_reference, subtotal.toFixed(3), total_discount.toFixed(3),
-         total_vat.toFixed(3), Number(shipping).toFixed(3), grand_total.toFixed(3),
+         total_vat.toFixed(3), Number(shipping||0).toFixed(3), grand_total.toFixed(3),
          notes, internal_notes, valid_until || null,
          isDraft ? 'draft' : 'unpaid', req.user.id]);
 
@@ -401,11 +423,7 @@ exports.update = async (req, res, next) => {
 
     const result = await db.withTransaction(async (client) => {
       // Recalculate totals from updated items
-      const invDisc      = Number(invoice_discount) || 0;
-      const subtotal     = items.reduce((s, i) => s + (Number(i.qty) * Number(i.unit_price) - Number(i.discount||0)), 0);
-      const total_discount = items.reduce((s, i) => s + Number(i.discount||0), 0) + invDisc;
-      const total_vat    = items.reduce((s, i) => s + ((Number(i.qty) * Number(i.unit_price) - Number(i.discount||0)) * Number(i.vat_rate) / 100), 0);
-      const grand_total  = subtotal - invDisc + total_vat + Number(shipping);
+      const { subtotal, total_discount, total_vat, grand_total } = calcTotals(items, invoice_discount, shipping);
 
       const { rows: [inv] } = await client.query(
         `UPDATE invoices SET po_reference=$1, due_date=$2, notes=$3, internal_notes=$4,
@@ -473,6 +491,53 @@ exports.getPayments = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Update payment ──────────────────────────────────────────
+exports.updatePayment = async (req, res, next) => {
+  try {
+    // Verify invoice + payment belong to this company
+    const { rows: [existing] } = await db.query(
+      `SELECT p.* FROM payments p
+       JOIN invoices i ON i.id = p.reference_id
+       WHERE p.id = $1 AND p.reference_id = $2 AND i.company_id = $3`,
+      [req.params.paymentId, req.params.id, req.user.company_id]);
+    if (!existing) return res.status(404).json({ error: { message: 'Payment not found' } });
+
+    const { amount, method, payment_date, reference_no, reference, notes } = req.body;
+    const ref = reference_no || reference || existing.reference_no;
+    const { rows: [pay] } = await db.query(
+      `UPDATE payments
+       SET amount=$1, method=$2, payment_date=$3, reference_no=$4, notes=$5
+       WHERE id=$6 RETURNING *`,
+      [amount ?? existing.amount,
+       method || existing.method,
+       payment_date || existing.payment_date,
+       ref,
+       notes ?? existing.notes,
+       req.params.paymentId]);
+    await audit.log(db, req, 'invoice.payment_updated', 'invoice', req.params.id,
+      null, null, { amount: pay.amount, method: pay.method, payment_date: pay.payment_date });
+    res.json({ data: pay, message: 'Payment updated' });
+  } catch (err) { next(err); }
+};
+
+// ── Delete payment ──────────────────────────────────────────
+exports.deletePayment = async (req, res, next) => {
+  try {
+    // Verify invoice + payment belong to this company
+    const { rows: [existing] } = await db.query(
+      `SELECT p.* FROM payments p
+       JOIN invoices i ON i.id = p.reference_id
+       WHERE p.id = $1 AND p.reference_id = $2 AND i.company_id = $3`,
+      [req.params.paymentId, req.params.id, req.user.company_id]);
+    if (!existing) return res.status(404).json({ error: { message: 'Payment not found' } });
+
+    await db.query(`DELETE FROM payments WHERE id = $1`, [req.params.paymentId]);
+    await audit.log(db, req, 'invoice.payment_deleted', 'invoice', req.params.id,
+      null, null, { amount: existing.amount, payment_date: existing.payment_date });
+    res.json({ message: 'Payment deleted' });
+  } catch (err) { next(err); }
+};
+
 // ── Bulk payment — one payment per invoice in a single transaction ──
 exports.bulkPayment = async (req, res, next) => {
   try {
@@ -519,7 +584,8 @@ exports.getPdf = async (req, res, next) => {
               c.tel AS customer_tel,
               co.name AS company_name, co.name_ar, co.address AS company_address,
               co.tel AS company_tel, co.vat_number, co.cr_number,
-              co.bank_name, co.bank_iban, co.bank_swift, co.logo AS company_logo, co.theme_color AS company_theme
+              co.bank_name, co.bank_iban, co.bank_swift, co.logo AS company_logo, co.theme_color AS company_theme,
+              co.pdf_settings AS company_pdf_settings
        FROM invoices i
        JOIN customers c ON c.id = i.customer_id
        JOIN companies co ON co.id = i.company_id
@@ -540,9 +606,49 @@ exports.getPdf = async (req, res, next) => {
         vat_number: inv.vat_number, cr_number: inv.cr_number,
         bank_name: inv.bank_name, bank_iban: inv.bank_iban, bank_swift: inv.bank_swift,
         logo: inv.company_logo, theme_color: inv.company_theme,
+        pdf_settings: inv.company_pdf_settings,
+      }
+    });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${inv.invoice_no}.pdf"`);
+    res.send(html);
+  } catch (err) { next(err); }
+};
+
+// ── Browser print (9.5"×11" dot-matrix) ───────────────────
+exports.getPrint = async (req, res, next) => {
+  try {
+    const { rows: [inv] } = await db.query(
+      `SELECT i.*, c.name AS customer_name, c.address AS customer_address,
+              c.vat_number AS customer_vat, c.cr_number AS customer_cr,
+              c.tel AS customer_tel,
+              co.name AS company_name, co.name_ar, co.address AS company_address,
+              co.tel AS company_tel, co.vat_number, co.cr_number,
+              co.bank_name, co.bank_iban, co.bank_swift, co.logo AS company_logo, co.theme_color AS company_theme,
+              co.pdf_settings AS company_pdf_settings
+       FROM invoices i
+       JOIN customers c ON c.id = i.customer_id
+       JOIN companies co ON co.id = i.company_id
+       WHERE i.id = $1 AND i.company_id = $2`,
+      [req.params.id, req.user.company_id]);
+    if (!inv) return res.status(404).json({ error: { message: 'Invoice not found' } });
+    const { rows: items } = await db.query(
+      `SELECT * FROM invoice_items WHERE invoice_id = $1 ORDER BY line_no`, [req.params.id]);
+    const { rows: dns } = await db.query(
+      `SELECT id, dn_no FROM delivery_notes WHERE invoice_id = $1`, [req.params.id]);
+    const html = pdfSvc.invoicePrintHtml({
+      ...inv, items, linked_dns: dns,
+      company: {
+        name: inv.company_name, name_ar: inv.name_ar,
+        address: inv.company_address, tel: inv.company_tel,
+        vat_number: inv.vat_number, cr_number: inv.cr_number,
+        bank_name: inv.bank_name, bank_iban: inv.bank_iban, bank_swift: inv.bank_swift,
+        logo: inv.company_logo, theme_color: inv.company_theme,
+        pdf_settings: inv.company_pdf_settings,
       }
     });
     res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('Content-Security-Policy', "script-src 'unsafe-inline'; script-src-attr 'unsafe-inline'");
     res.send(html);
   } catch (err) { next(err); }
 };

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { reportApi } from '../../../services/api'
 import CustomerTypeahead from '../shared/CustomerTypeahead'
@@ -23,7 +23,6 @@ export default function StatementOfAccounts({ preselectedCustomerId = '' }) {
   const [from,       setFrom]       = useState(firstOfYear)
   const [to,         setTo]         = useState(today)
   const [runParams,  setRunParams]  = useState(null)
-  const printRef = useRef()
 
 
   const { data, isFetching, error } = useQuery({
@@ -37,42 +36,8 @@ export default function StatementOfAccounts({ preselectedCustomerId = '' }) {
     setRunParams({ customer_id: customerId, from, to })
   }
 
-  const handlePrint = () => {
-    const printContent = printRef.current.innerHTML
-    const w = window.open('', '_blank')
-    w.document.write(`<!DOCTYPE html><html><head>
-      <title>Statement of Accounts</title>
-      <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: Arial, sans-serif; font-size: 11pt; color: #222; padding: 20px; }
-        .header { display:flex; justify-content:space-between; margin-bottom:16px; border-bottom:2px solid var(--blue); padding-bottom:10px; }
-        .co-name { font-size:15pt; font-weight:bold; color:var(--blue); }
-        .co-sub  { font-size:9pt; color:#666; margin-top:2px; }
-        .title-block { text-align:right; }
-        .title-block .doc-title { font-size:14pt; font-weight:bold; color:#333; }
-        .meta { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:14px; }
-        .meta-box { background:#f8f8f8; border:1px solid #ddd; border-radius:3px; padding:8px 12px; }
-        .meta-box h4 { font-size:9pt; color:#888; font-weight:600; margin-bottom:4px; text-transform:uppercase; letter-spacing:0.5px; }
-        .meta-box p  { font-size:10pt; margin:1px 0; }
-        table { width:100%; border-collapse:collapse; font-size:10pt; }
-        thead tr { background:var(--blue); color:#fff; }
-        th { padding:6px 8px; text-align:left; font-weight:600; }
-        th.r, td.r { text-align:right; }
-        td { padding:5px 8px; border-bottom:1px solid #eee; }
-        tr:nth-child(even) td { background:#f9f9f9; }
-        .ob-row td { background:#fff8e1 !important; font-style:italic; color:#5d4037; }
-        .badge { display:inline-block; padding:1px 7px; border-radius:10px; font-size:9pt; }
-        .tfoot td { font-weight:700; border-top:2px solid var(--blue); background:#fff !important; }
-        .balance-neg { color:#c62828; }
-        .balance-pos { color:#2e7d32; }
-        .footer { margin-top:16px; padding-top:8px; border-top:1px solid #ddd; font-size:8pt; color:#888; text-align:center; }
-        @media print { body { padding:0; } }
-      </style>
-    </head><body>${printContent}</body></html>`)
-    w.document.close()
-    w.focus()
-    setTimeout(() => { w.print(); w.close() }, 300)
-  }
+  const pdfUrl   = runParams ? reportApi.statementPdfUrl(runParams)   : null
+  const printUrl = runParams ? reportApi.statementPrintUrl(runParams) : null
 
   return (
     <div>
@@ -101,9 +66,14 @@ export default function StatementOfAccounts({ preselectedCustomerId = '' }) {
           {isFetching ? '⏳ Loading...' : 'Generate Statement'}
         </button>
         {data && (
-          <button className="btn" onClick={handlePrint} style={{ marginLeft:'auto' }}>
-            🖨 Print / PDF
-          </button>
+          <div style={{ display:'flex', gap:6, marginLeft:'auto' }}>
+            <a className="btn" href={pdfUrl} target="_blank" rel="noreferrer">
+              📄 PDF
+            </a>
+            <a className="btn" href={printUrl} target="_blank" rel="noreferrer">
+              🖨 Print
+            </a>
+          </div>
         )}
       </div>
 
@@ -114,7 +84,7 @@ export default function StatementOfAccounts({ preselectedCustomerId = '' }) {
       )}
 
       {data && (
-        <div ref={printRef}>
+        <div>
           {/* ── Letterhead ── */}
           <div className="header" style={{ display:'flex', justifyContent:'space-between', borderBottom:'2px solid var(--blue)', paddingBottom:10, marginBottom:14 }}>
             <div>

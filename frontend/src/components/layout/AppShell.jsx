@@ -27,35 +27,37 @@ import SuppliersModule  from '../modules/suppliers/SuppliersModule'
 import ContraModule     from '../modules/contra/ContraModule'
 import AnalyticsModule from '../modules/analytics/AnalyticsModule'
 
+// roles: which roles can see this item (omit = all roles)
+// toggleable: whether admin can hide it per-company (core items are always shown)
 const NAV = [
   { section: 'Sales' },
-  { id: 'quotations', label: 'Quotations',      icon: '📋' },
-  { id: 'dns',        label: 'Delivery Notes',  icon: '🚚' },
-  { id: 'invoices',   label: 'Invoices',        icon: '🧾' },
+  { id: 'quotations',      label: 'Quotations',        icon: '📋', roles: ['admin','sales'],                          toggleable: true },
+  { id: 'dns',             label: 'Delivery Notes',    icon: '🚚', roles: ['admin','sales','storekeeper'],            toggleable: false },
+  { id: 'invoices',        label: 'Invoices',          icon: '🧾', roles: ['admin','sales','accountant'],             toggleable: false },
   { section: 'Procurement' },
-  { id: 'suppliers',       label: 'Suppliers',        icon: '🏭' },
-  { id: 'purchase-orders', label: 'Purchase Orders', icon: '📝' },
-  { id: 'purchases',  label: 'Purchase Invoices', icon: '📥' },
-  { id: 'shipments',  label: 'Landed Costs',    icon: '🚢' },
-  { id: 'products',   label: 'Products',        icon: '📦' },
+  { id: 'suppliers',       label: 'Suppliers',         icon: '🏭', roles: ['admin','accountant','storekeeper'],       toggleable: true },
+  { id: 'purchase-orders', label: 'Purchase Orders',   icon: '📝', roles: ['admin','storekeeper'],                   toggleable: true },
+  { id: 'purchases',       label: 'Purchase Invoices', icon: '📥', roles: ['admin','accountant','storekeeper'],       toggleable: true },
+  { id: 'shipments',       label: 'Landed Costs',      icon: '🚢', roles: ['admin','storekeeper'],                   toggleable: true },
+  { id: 'products',        label: 'Products',          icon: '📦', roles: ['admin','sales','storekeeper'],            toggleable: false },
   { section: 'CRM' },
-  { id: 'crm',        label: 'Pipeline',        icon: '🎯' },
-  { id: 'customers',  label: 'Customers',       icon: '👥' },
+  { id: 'crm',             label: 'Pipeline',          icon: '🎯', roles: ['admin','sales'],                         toggleable: true },
+  { id: 'customers',       label: 'Customers',         icon: '👥', roles: ['admin','sales','accountant'],             toggleable: false },
   { section: 'HR' },
-  { id: 'hr',         label: 'HR & Payroll',    icon: '👤' },
-  { id: 'tasks',      label: 'Tasks',           icon: '✅' },
+  { id: 'hr',              label: 'HR & Payroll',      icon: '👤', roles: ['admin'],                                  toggleable: true },
+  { id: 'tasks',           label: 'Tasks',             icon: '✅', roles: ['admin','sales','accountant','storekeeper'], toggleable: true },
   { section: 'Finance' },
-  { id: 'contra',     label: 'Contra Accounts', icon: '⚖️' },
-  { id: 'finance',    label: 'Fin. Overview',   icon: '📈' },
-  { id: 'cheques',    label: 'Cheque Register', icon: '🏷' },
-  { id: 'expenses',   label: 'Expenses',        icon: '💸' },
-  { id: 'bank',       label: 'Bank Recon.',     icon: '🏦' },
+  { id: 'contra',          label: 'Contra Accounts',   icon: '⚖️', roles: ['admin','accountant'],                    toggleable: true },
+  { id: 'finance',         label: 'Fin. Overview',     icon: '📈', roles: ['admin','accountant'],                    toggleable: true },
+  { id: 'cheques',         label: 'Cheque Register',   icon: '🏷', roles: ['admin','accountant'],                    toggleable: true },
+  { id: 'expenses',        label: 'Expenses',          icon: '💸', roles: ['admin','accountant'],                    toggleable: true },
+  { id: 'bank',            label: 'Bank Recon.',       icon: '🏦', roles: ['admin','accountant'],                    toggleable: true },
   { section: 'Reports' },
-  { id: 'analytics',  label: 'Analytics',       icon: '🔍' },
-  { id: 'reports',    label: 'Reports',         icon: '📊' },
+  { id: 'analytics',       label: 'Analytics',         icon: '🔍', roles: ['admin','sales','accountant'],            toggleable: true },
+  { id: 'reports',         label: 'Reports',           icon: '📊', roles: ['admin','sales','accountant','storekeeper'], toggleable: true },
   { section: null },
-  { id: 'dashboard',  label: 'Dashboard',       icon: '🏠' },
-  { id: 'settings',   label: 'Settings',        icon: '⚙️' },
+  { id: 'dashboard',       label: 'Dashboard',         icon: '🏠' },
+  { id: 'settings',        label: 'Settings',          icon: '⚙️', roles: ['admin'] },
 ]
 
 const MODULES = {
@@ -163,31 +165,57 @@ export default function AppShell() {
           </div>
 
           <div style={{ padding: '5px 0', flex: 1 }}>
-            {NAV.map((item, i) => {
-              if (item.section !== undefined) {
-                return item.section
-                  ? <div key={i} style={{ padding:'4px 11px 2px', fontSize:10, color:'#777', textTransform:'uppercase', letterSpacing:'.5px', background:'transparent', borderBottom:'1px solid #444' }}>{item.section}</div>
-                  : <div key={i} style={{ height:1, background:'#444', margin:'3px 0' }} />
-              }
-              const active = activeModule === item.id
-              return (
-                <div key={item.id}
-                  onClick={() => setModule(item.id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 8,
-                    padding: '8px 11px', cursor: 'pointer', fontSize: 12,
-                    color: active ? '#fff' : '#c8c8c8',
-                    background: active ? 'var(--blue)' : 'transparent',
-                    borderLeft: `3px solid ${active ? '#7eb8f0' : 'transparent'}`,
-                  }}
-                  onMouseEnter={e => { if (!active) e.currentTarget.style.background = '#3a3a3a' }}
-                  onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
-                >
-                  <span style={{ fontSize: 14, width: 16, textAlign: 'center', flexShrink: 0 }}>{item.icon}</span>
-                  {item.label}
-                </div>
-              )
-            })}
+            {(() => {
+              const role          = user?.role || ''
+              const hiddenModules = co?.hidden_modules || []
+
+              // Filter items: skip if role not allowed, or admin has hidden it
+              const visible = NAV.filter(item => {
+                if (item.section !== undefined) return true   // sections handled below
+                if (item.roles && !item.roles.includes(role)) return false
+                if (hiddenModules.includes(item.id)) return false
+                return true
+              })
+
+              // Remove section headers that have no visible children
+              const visibleIds = new Set(visible.filter(i => i.id).map(i => i.id))
+              const filtered = visible.filter((item, idx) => {
+                if (item.section === undefined) return true           // regular item
+                if (item.section === null)      return true           // separator
+                // section header: keep only if at least one following item (until next section) is visible
+                for (let j = idx + 1; j < visible.length; j++) {
+                  if (visible[j].section !== undefined) break        // hit next section
+                  if (visibleIds.has(visible[j].id))   return true
+                }
+                return false
+              })
+
+              return filtered.map((item, i) => {
+                if (item.section !== undefined) {
+                  return item.section
+                    ? <div key={i} style={{ padding:'4px 11px 2px', fontSize:10, color:'#777', textTransform:'uppercase', letterSpacing:'.5px', background:'transparent', borderBottom:'1px solid #444' }}>{item.section}</div>
+                    : <div key={i} style={{ height:1, background:'#444', margin:'3px 0' }} />
+                }
+                const active = activeModule === item.id
+                return (
+                  <div key={item.id}
+                    onClick={() => setModule(item.id)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '8px 11px', cursor: 'pointer', fontSize: 12,
+                      color: active ? '#fff' : '#c8c8c8',
+                      background: active ? 'var(--blue)' : 'transparent',
+                      borderLeft: `3px solid ${active ? '#7eb8f0' : 'transparent'}`,
+                    }}
+                    onMouseEnter={e => { if (!active) e.currentTarget.style.background = '#3a3a3a' }}
+                    onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
+                  >
+                    <span style={{ fontSize: 14, width: 16, textAlign: 'center', flexShrink: 0 }}>{item.icon}</span>
+                    {item.label}
+                  </div>
+                )
+              })
+            })()}
           </div>
 
           {/* Powered by */}

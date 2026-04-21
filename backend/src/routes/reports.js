@@ -5,8 +5,10 @@ const { authenticate, authorize } = require('../middleware/auth');
 router.use(authenticate);
 
 // These are accessible to all authenticated roles (no role restriction)
-router.get('/statement', ctrl.statement);
-router.get('/dashboard',  ctrl.dashboard);
+router.get('/statement',       ctrl.statement);
+router.get('/statement/pdf',   ctrl.statementPdf);
+router.get('/statement/print', ctrl.statementPrint);
+router.get('/dashboard',       ctrl.dashboard);
 
 router.use(authorize('admin','accountant','sales'));
 router.get('/vat',            ctrl.vatReport);

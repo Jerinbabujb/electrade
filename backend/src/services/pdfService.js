@@ -1,341 +1,636 @@
-// PDF Service — generates HTML that the browser prints as PDF
-// No Puppeteer / Chromium needed. The /pdf endpoints return
-// a full HTML page with print CSS. User clicks Print → Save as PDF.
+// PDF Service — renders HTML via headless Chromium (puppeteer-core) to produce real PDF buffers.
+const puppeteer = require('puppeteer-core')
+
+let _browser = null
+async function getBrowser() {
+  if (!_browser || !_browser.connected) {
+    _browser = await puppeteer.launch({
+      executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium-browser',
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      headless: true,
+    })
+  }
+  return _browser
+}
+
+async function htmlToPdf(html) {
+  const browser = await getBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.setContent(html, { waitUntil: 'domcontentloaded' })
+    return await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: { top: '12mm', right: '12mm', bottom: '12mm', left: '12mm' },
+    })
+  } finally {
+    await page.close()
+  }
+}
+
+function printControls(brand) {
+  return `
+<div style="position:fixed;top:10px;right:12px;display:flex;gap:8px;z-index:999;background:rgba(255,255,255,.92);padding:6px 8px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">
+  <button id="btnPrint" style="padding:6px 16px;background:${brand};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600">🖨 Print</button>
+  <button id="btnClose" style="padding:6px 14px;background:#f0f0f0;color:#333;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600">✕ Close</button>
+</div>
+<script>
+  document.getElementById('btnPrint').addEventListener('click',function(){window.print()});
+  document.getElementById('btnClose').addEventListener('click',function(){window.close()});
+</script>`
+}
+
+// ── Settings helper ────────────────────────────────────────
+function getSettings(co) {
+  const s = (co && typeof co.pdf_settings === 'object' && co.pdf_settings) ? co.pdf_settings : {}
+  return {
+    template:     s.template         || 'clean',   // 'clean' | 'classic' | 'compact'
+    bilingual:    (s.language        || 'bilingual') === 'bilingual',
+    showPartNo:   s.show_part_no     !== false,
+    showUnit:     s.show_unit        !== false,
+    showDiscount: s.show_discount    !== false,
+    showVatCol:   s.show_vat_col     !== false,
+    showBank:     s.show_bank        !== false,
+    showSigs:     s.show_signatures  !== false,
+    showBalance:  s.show_balance_due !== false,
+    footer:       s.custom_footer    || '',
+  }
+}
 
 const TYPE_META = {
-  tax_invoice:  { en:'TAX INVOICE',      ar:'فاتورة ضريبية',   refLabel:'Invoice No.',     footer:'Computer-generated tax invoice · فاتورة ضريبية معتمدة' },
-  quotation:    { en:'QUOTATION',         ar:'عرض سعر',          refLabel:'Quotation No.',   footer:'This quotation is not a tax invoice · عرض سعر' },
-  proforma:     { en:'PROFORMA INVOICE',  ar:'فاتورة مبدئية',   refLabel:'Proforma No.',    footer:'Proforma invoice — not a tax invoice · فاتورة مبدئية' },
-  credit_note:  { en:'CREDIT NOTE',       ar:'إشعار دائن',       refLabel:'Credit Note No.', footer:'Computer-generated credit note · إشعار دائن' },
-  receipt:      { en:'RECEIPT',           ar:'إيصال',             refLabel:'Receipt No.',     footer:'Computer-generated receipt · إيصال' },
+  tax_invoice:  { en: 'TAX INVOICE',      ar: 'فاتورة ضريبية',  refLabel: 'Invoice No.',     footer: 'Computer-generated tax invoice · فاتورة ضريبية معتمدة' },
+  quotation:    { en: 'QUOTATION',         ar: 'عرض سعر',         refLabel: 'Quotation No.',   footer: 'This quotation is not a tax invoice · عرض سعر' },
+  proforma:     { en: 'PROFORMA INVOICE',  ar: 'فاتورة مبدئية',  refLabel: 'Proforma No.',    footer: 'Proforma invoice — not a tax invoice · فاتورة مبدئية' },
+  credit_note:  { en: 'CREDIT NOTE',       ar: 'إشعار دائن',      refLabel: 'Credit Note No.', footer: 'Computer-generated credit note · إشعار دائن' },
+  receipt:      { en: 'RECEIPT',           ar: 'إيصال',            refLabel: 'Receipt No.',     footer: 'Computer-generated receipt · إيصال' },
 }
 
 function fmtDate(val) {
   if (!val) return '—'
   const d = new Date(val)
   if (isNaN(d)) return String(val)
-  return d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' })
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
 }
 
-function invoiceHtml(inv) {
+function esc(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// ─────────────────────────────────────────────
+//  INVOICE / QUOTATION / PROFORMA / CREDIT NOTE
+// ─────────────────────────────────────────────
+function invoiceHtml(inv, { forPrint = false } = {}) {
   const co    = inv.company || {}
   const items = inv.items   || []
   const meta  = TYPE_META[inv.type] || TYPE_META.tax_invoice
   const brand = (co.theme_color && /^#[0-9a-fA-F]{6}$/.test(co.theme_color)) ? co.theme_color : '#1a5fa8'
+  const s     = getSettings(co)
 
-  const subtotal   = items.reduce((s,i) => s + parseFloat(i.net_amount  || 0), 0)
-  const totalVat   = items.reduce((s,i) => s + parseFloat(i.vat_amount  || 0), 0)
-  const grandTotal = subtotal + totalVat + parseFloat(inv.shipping || 0)
-  const balance    = parseFloat(inv.balance_due ?? grandTotal)
+  // Template-driven sizing
+  const compact  = s.template === 'compact'
+  const classic  = s.template === 'classic'
+  const fs       = compact ? '9.5px'   : '11px'
+  const hPad     = compact ? '12px 18px' : '20px 24px'
+  const sPad     = compact ? '10px 18px' : '16px 24px'
+  const secPad   = compact ? '8px 18px'  : '10px 24px'
+  const rowPad   = compact ? '3.5px 5px' : '5.5px 6px'
+  const thPad    = compact ? '4px 5px'   : '6px 6px'
 
-  const hasDiscount = items.some(it => parseFloat(it.discount || 0) > 0)
+  // Totals — use stored header values (authoritative, VAT-compliant)
+  const subtotal      = parseFloat(inv.subtotal      || 0)
+  const totalDiscount = parseFloat(inv.total_discount || 0)
+  const totalVat      = parseFloat(inv.total_vat      || 0)
+  const shipping      = parseFloat(inv.shipping       || 0)
+  const grandTotal    = parseFloat(inv.grand_total    || subtotal - totalDiscount + totalVat + shipping)
+  const balance       = parseFloat(inv.balance_due    ?? grandTotal)
 
-  const rows = items.map((it,i) => `
-    <tr class="${i%2?'s':''}">
-      <td>${i+1}</td>
-      <td>${esc(it.part_no||'')}</td>
-      <td>${esc(it.description||'')}</td>
-      <td class="r">${parseFloat(it.qty||0).toFixed(3)}</td>
-      <td>${esc(it.unit||'')}</td>
-      <td class="r">${parseFloat(it.unit_price||0).toFixed(3)}</td>
-      ${hasDiscount ? `<td class="r">${parseFloat(it.discount||0).toFixed(3)}</td>` : ''}
-      <td class="r">${parseFloat(it.vat_rate||10).toFixed(0)}%</td>
-      <td class="r">${parseFloat(it.line_total||0).toFixed(3)}</td>
-    </tr>`).join('')
+  // Break discount into line-level vs overall/invoice-level
+  const lineDiscSum   = items.reduce((s, i) => s + parseFloat(i.discount || 0), 0)
+  const overallDisc   = Math.max(0, totalDiscount - lineDiscSum)
+  const netTaxable    = subtotal - totalDiscount   // shown when any discount exists
 
-  const linkedDns = (inv.linked_dns||[]).filter(Boolean)
-    .map(d => `<span class="chip">${esc(d.dn_no||d)}</span>`).join(' ')
+  const statusColor = { paid: '#2e7d32', unpaid: '#b45309', overdue: '#c62828', partial: '#1565c0' }
+  const sc    = statusColor[inv.payment_status] || '#b45309'
+  const scBg  = { paid: '#f0fdf4', unpaid: '#fffbeb', overdue: '#fef2f2', partial: '#eff6ff' }
+  const scBgV = scBg[inv.payment_status] || '#fffbeb'
 
-  const statusColor = { paid:'#2e7d32', unpaid:'#e65100', overdue:'#c62828', partial:'#1565c0' }
-  const sc = statusColor[inv.payment_status] || '#e65100'
+  // Column flags
+  const showDisc = s.showDiscount && items.some(it => parseFloat(it.discount || 0) > 0)
+
+  // Item rows — compute line amounts from stored qty/unit_price/discount
+  const rows = items.map((it, i) => {
+    const lineNet = parseFloat(it.qty || 0) * parseFloat(it.unit_price || 0) - parseFloat(it.discount || 0)
+    return `
+    <tr>
+      <td style="color:#999;text-align:center;padding:${rowPad}">${i + 1}</td>
+      ${s.showPartNo  ? `<td style="color:#555;padding:${rowPad}">${esc(it.part_no || '')}</td>` : ''}
+      <td style="padding:${rowPad}">${esc(it.description || '')}</td>
+      <td style="text-align:right;padding:${rowPad}">${parseFloat(it.qty || 0).toFixed(3)}</td>
+      ${s.showUnit    ? `<td style="color:#777;padding:${rowPad}">${esc(it.unit || '')}</td>` : ''}
+      <td style="text-align:right;padding:${rowPad}">${parseFloat(it.unit_price || 0).toFixed(3)}</td>
+      ${showDisc      ? `<td style="text-align:right;padding:${rowPad};color:#2e7d32">${parseFloat(it.discount || 0) > 0 ? parseFloat(it.discount || 0).toFixed(3) : '—'}</td>` : ''}
+      ${s.showVatCol  ? `<td style="text-align:right;color:#666;padding:${rowPad}">${parseFloat(it.vat_rate || 10).toFixed(0)}%</td>` : ''}
+      <td style="text-align:right;font-weight:600;padding:${rowPad}">${lineNet.toFixed(3)}</td>
+    </tr>`
+  }).join('')
+
+  const linkedDns = (inv.linked_dns || []).filter(Boolean)
+    .map(d => `<span style="display:inline-block;padding:1px 8px;border:1px solid #c7d9f7;border-radius:10px;margin:1px 2px;font-size:9.5px;color:${brand};background:#f0f5ff">${esc(d.dn_no || d)}</span>`).join(' ')
+
+  // ── Header HTML (differs by template) ──────────────────
+  const logoImg = co.logo ? `<img src="${co.logo}" alt="" style="height:${compact?'44px':'56px'};max-width:120px;object-fit:contain">` : ''
+  const coMeta  = `${esc(co.address || '')}${co.tel ? ` · Tel: ${esc(co.tel)}` : ''}<br>${co.vat_number ? `VAT Reg: ${esc(co.vat_number)}` : ''}${co.cr_number ? ` · CR: ${esc(co.cr_number)}` : ''}`
+
+  const headerHtml = classic ? `
+<div style="background:${brand};color:#fff;padding:${hPad};display:flex;justify-content:space-between;align-items:flex-start">
+  <div style="display:flex;gap:12px;align-items:flex-start">
+    ${co.logo ? `<img src="${co.logo}" alt="" style="height:${compact?'44px':'52px'};max-width:120px;object-fit:contain;background:rgba(255,255,255,.15);border-radius:3px;padding:3px">` : ''}
+    <div>
+      <div style="font-size:${compact?'13px':'15px'};font-weight:700">${esc(co.name || '')}</div>
+      ${s.bilingual && co.name_ar ? `<div style="font-size:11px;margin-top:2px;opacity:.8">${esc(co.name_ar)}</div>` : ''}
+      <div style="font-size:9px;margin-top:4px;opacity:.75;line-height:1.8">${coMeta}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:${compact?'17px':'21px'};font-weight:700;background:rgba(255,255,255,.15);padding:${compact?'5px 12px':'7px 16px'};border-radius:4px;display:inline-block;letter-spacing:-.5px">${meta.en}</div>
+    ${s.bilingual ? `<div style="font-size:10px;opacity:.8;margin-top:4px">${meta.ar}</div>` : ''}
+    <div style="font-size:13px;font-weight:700;margin-top:6px">${esc(inv.invoice_no || '')}</div>
+  </div>
+</div>` : `
+<div style="height:4px;background:${brand}"></div>
+<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:${hPad};border-bottom:1px solid #ebebeb">
+  <div style="display:flex;gap:14px;align-items:flex-start">
+    ${logoImg}
+    <div>
+      <div style="font-size:${compact?'13px':'14px'};font-weight:700;color:#111;line-height:1.3">${esc(co.name || '')}</div>
+      ${s.bilingual && co.name_ar ? `<div style="font-size:11px;color:#777;margin-top:2px">${esc(co.name_ar)}</div>` : ''}
+      <div style="font-size:9px;color:#888;margin-top:5px;line-height:1.8">${coMeta}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:${compact?'18px':'22px'};font-weight:700;color:${brand};letter-spacing:-.5px;line-height:1.1">${meta.en}</div>
+    ${s.bilingual ? `<div style="font-size:11px;color:#aaa;margin-top:2px">${meta.ar}</div>` : ''}
+    <div style="font-size:13px;font-weight:700;color:#333;margin-top:6px">${esc(inv.invoice_no || '')}</div>
+  </div>
+</div>`
+
+  const footerText = s.footer || meta.footer
+
+  const pageSize = forPrint ? '9.5in 11in' : 'A4'
+  const margin   = forPrint ? '5mm' : '0'
+  const minH     = forPrint ? 'calc(11in - 10mm)' : '273mm'
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>${esc(inv.invoice_no||'Invoice')}</title>
+<title>${esc(inv.invoice_no || 'Document')}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11.5px;color:#1a1a1a;background:#fff}
-  .hdr{background:${brand};color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:flex-start}
-  .co-name{font-size:15px;font-weight:700}
-  .co-ar{font-size:12px;margin-top:3px;opacity:.85}
-  .co-meta{font-size:9.5px;margin-top:5px;opacity:.8;line-height:1.6}
-  .inv-box{background:#fff;color:${brand};padding:8px 14px;border-radius:4px;text-align:center;min-width:140px}
-  .inv-box-title{font-size:13px;font-weight:700}
-  .inv-box-ar{font-size:9px;color:#888;margin-top:2px}
-  .info{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 18px;background:#f8f8f8;border-bottom:1px solid #e0e0e0}
-  .box{background:#fff;border:1px solid #e0e0e0}
-  .box-hd{background:${brand};color:#fff;padding:3px 8px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
-  .box-body{padding:8px}
-  .cname{font-size:12px;font-weight:700;margin-bottom:4px}
-  .cmeta{font-size:10px;color:#666;line-height:1.6}
-  .meta-tbl{width:100%;font-size:10.5px;border-collapse:collapse}
-  .meta-tbl td{padding:2px 0}
-  .meta-tbl td:last-child{text-align:right;font-weight:600}
-  table.items{width:100%;border-collapse:collapse;font-size:11px;margin:0 18px;width:calc(100% - 36px)}
-  table.items th{background:${brand};color:#fff;padding:5px 5px;text-align:left;font-size:10.5px}
-  table.items th.r, table.items td.r{text-align:right}
-  table.items td{padding:4px 5px;border-bottom:1px solid #e8e8e8}
-  table.items tr.s{background:#f7f7f7}
-  .totals{display:flex;justify-content:flex-end;padding:8px 18px}
-  .tot-tbl{width:240px;font-size:11.5px;border-collapse:collapse}
-  .tot-tbl td{padding:3px 5px}
-  .tot-tbl .grand{font-size:13px;font-weight:700;color:${brand};border-top:2px solid ${brand}}
-  .tot-tbl .grand td{padding:5px 5px}
-  .balance{padding:3px 8px;border-radius:3px;font-weight:700;font-size:11px;display:inline-block}
-  .dns{padding:7px 18px;background:#e8f0fb;border-top:1px solid #b0c8f0;font-size:10.5px;color:${brand}}
-  .chip{display:inline-block;padding:1px 7px;background:#fff;border:1px solid #b0c8f0;border-radius:10px;margin:1px;font-size:10px}
-  .notes{padding:8px 18px;background:#f8f8f8;border-top:1px solid #e0e0e0;font-size:10.5px}
-  .bank{padding:7px 18px;font-size:10px;color:#555;border-top:1px solid #e0e0e0}
-  .ftr{background:${brand};color:#cce0ff;padding:6px 18px;font-size:9.5px;text-align:center;margin-top:8px}
-  .print-btn{position:fixed;top:12px;right:12px;padding:8px 16px;background:${brand};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;z-index:999}
-  @media print{.print-btn{display:none}body{font-size:10.5px}@page{margin:10mm;size:A4}}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:${fs};color:#222;background:#fff;display:flex;flex-direction:column;min-height:${minH}}
+  table.items{width:100%;border-collapse:collapse}
+  table.items thead tr{border-bottom:2px solid ${brand}}
+  table.items th{text-align:left;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:${brand};padding:${thPad};white-space:nowrap}
+  table.items th.r{text-align:right}
+  table.items tbody tr:nth-child(even) td{background:#fafafa}
+  table.items tbody tr td{border-bottom:1px solid #f0f0f0;vertical-align:top}
+  @media print{@page{margin:${margin};size:${pageSize}}}
 </style>
 </head>
 <body>
-<button class="print-btn" onclick="window.print()">🖨 Print / Save PDF</button>
+${forPrint ? printControls(brand) : ''}
+${headerHtml}
 
-<div class="hdr">
-  <div style="display:flex;align-items:center;gap:12px">
-    ${co.logo ? `<img src="${co.logo}" alt="logo" style="height:54px;max-width:160px;object-fit:contain;background:#fff;border-radius:3px;padding:3px">` : ''}
-    <div>
-      <div class="co-name">${esc(co.name||'Al Manama Electrical Trading Co. W.L.L')}</div>
-      <div class="co-ar">${esc(co.name_ar||'شركة المنامة لتجارة الكهربائيات')}</div>
-      <div class="co-meta">
-        ${esc(co.address||'Salmaniya Industrial Area, Manama, Bahrain')}<br>
-        Tel: ${esc(co.tel||'+973 1711 2233')} &nbsp;|&nbsp;
-        VAT Reg: ${esc(co.vat_number||'')} &nbsp;|&nbsp;
-        CR: ${esc(co.cr_number||'')}
-      </div>
+<div style="display:grid;grid-template-columns:1fr 1fr;padding:${sPad};border-bottom:1px solid #ebebeb;background:#fafafa">
+  <div>
+    <div style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:${brand};margin-bottom:5px">Bill To</div>
+    <div style="font-size:${compact?'11px':'12px'};font-weight:700;color:#111;margin-bottom:3px">${esc(inv.customer_name || '')}</div>
+    <div style="font-size:9.5px;color:#777;line-height:1.7">
+      ${inv.customer_vat ? `VAT: ${esc(inv.customer_vat)}<br>` : ''}
+      ${inv.customer_cr  ? `CR: ${esc(inv.customer_cr)}<br>`   : ''}
+      ${inv.customer_tel ? `Tel: ${esc(inv.customer_tel)}`      : ''}
     </div>
   </div>
-  <div class="inv-box">
-    <div class="inv-box-title">${meta.en}</div>
-    <div class="inv-box-ar">${meta.ar}</div>
+  <div style="padding-left:24px;border-left:1px solid #e4e4e4">
+    <div style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:${brand};margin-bottom:5px">Document Details</div>
+    ${[
+      [meta.refLabel, esc(inv.invoice_no || '')],
+      ['Date', fmtDate(inv.invoice_date)],
+      (inv.type === 'quotation' || inv.type === 'proforma') && inv.valid_until
+        ? ['Valid Until', fmtDate(inv.valid_until)]
+        : inv.due_date ? ['Due Date', fmtDate(inv.due_date)] : null,
+      inv.po_reference ? [(inv.type === 'quotation' || inv.type === 'proforma') ? 'Client Ref' : 'PO Reference', esc(inv.po_reference)] : null,
+      (inv.payment_status && inv.type === 'tax_invoice') ? ['Status', `<span style="color:${sc};font-weight:700">${esc(inv.payment_status.charAt(0).toUpperCase()+inv.payment_status.slice(1))}</span>`] : null,
+    ].filter(Boolean).map(([lbl, val]) => `
+      <div style="display:flex;justify-content:space-between;font-size:10px;padding:2.5px 0;border-bottom:1px dotted #eee">
+        <span style="color:#888">${lbl}</span><span style="font-weight:600;color:#222">${val}</span>
+      </div>`).join('')}
   </div>
 </div>
 
-<div class="info">
-  <div class="box">
-    <div class="box-hd">Bill To</div>
-    <div class="box-body">
-      <div class="cname">${esc(inv.customer_name||'')}</div>
-      <div class="cmeta">
-        VAT: ${esc(inv.customer_vat||'—')}<br>
-        CR: ${esc(inv.customer_cr||'—')}
-      </div>
-    </div>
-  </div>
-  <div class="box">
-    <div class="box-hd">Document Details</div>
-    <div class="box-body">
-      <table class="meta-tbl">
-        <tr><td>${meta.refLabel}</td><td>${esc(inv.invoice_no||'')}</td></tr>
-        <tr><td>Date</td><td>${fmtDate(inv.invoice_date)}</td></tr>
-        ${(inv.type === 'quotation' || inv.type === 'proforma') && inv.valid_until
-          ? `<tr><td>Valid Until</td><td>${fmtDate(inv.valid_until)}</td></tr>`
-          : inv.due_date ? `<tr><td>Due Date</td><td>${fmtDate(inv.due_date)}</td></tr>` : ''}
-        ${(inv.type !== 'quotation' && inv.type !== 'proforma') ? `<tr><td>PO Reference</td><td>${esc(inv.po_reference||'—')}</td></tr>` : ''}
-        ${inv.po_reference && (inv.type === 'quotation' || inv.type === 'proforma') ? `<tr><td>Client Ref</td><td>${esc(inv.po_reference)}</td></tr>` : ''}
-      </table>
-    </div>
-  </div>
-</div>
-
-<div style="padding:10px 18px">
+<div style="padding:${compact?'10px 18px 0':'14px 24px 0'}">
 <table class="items">
-  <thead><tr>
-    <th>#</th><th>Part No.</th><th>Description</th>
-    <th class="r">Qty</th><th>Unit</th><th class="r">Unit Price</th>
-    ${hasDiscount ? '<th class="r">Discount</th>' : ''}
-    <th class="r">VAT%</th><th class="r">Amount BHD</th>
-  </tr></thead>
+  <thead>
+    <tr>
+      <th style="width:24px;text-align:center">#</th>
+      ${s.showPartNo  ? `<th>Part No.</th>`            : ''}
+      <th>Description</th>
+      <th class="r">Qty</th>
+      ${s.showUnit    ? `<th>Unit</th>`                : ''}
+      <th class="r">Unit Price</th>
+      ${showDisc      ? `<th class="r">Discount</th>`  : ''}
+      ${s.showVatCol  ? `<th class="r">VAT%</th>`      : ''}
+      <th class="r">Amount (BHD)</th>
+    </tr>
+  </thead>
   <tbody>${rows}</tbody>
 </table>
 </div>
 
-<div class="totals">
-  <table class="tot-tbl">
-    <tr><td>Subtotal:</td><td style="text-align:right">BHD ${subtotal.toFixed(3)}</td></tr>
-    <tr><td>VAT (10%):</td><td style="text-align:right;color:#c62828">BHD ${totalVat.toFixed(3)}</td></tr>
-    <tr><td>Shipping:</td><td style="text-align:right">BHD ${parseFloat(inv.shipping||0).toFixed(3)}</td></tr>
-    <tr class="grand">
-      <td>GRAND TOTAL:</td>
-      <td style="text-align:right">BHD ${grandTotal.toFixed(3)}</td>
-    </tr>
+<div style="display:flex;justify-content:flex-end;padding:${compact?'8px 18px 4px':'12px 24px 4px'}">
+  <table style="width:290px;font-size:11px;border-collapse:collapse">
     <tr>
-      <td style="font-size:10px;color:#888">Balance Due:</td>
-      <td style="text-align:right">
-        <span class="balance" style="background:${balance>0?'#fff8e1':'#e8f5e9'};color:${sc}">
-          BHD ${balance.toFixed(3)}
-        </span>
-      </td>
+      <td style="padding:4px 6px;color:#666">Subtotal</td>
+      <td style="padding:4px 6px;text-align:right">BHD ${subtotal.toFixed(3)}</td>
     </tr>
+    ${lineDiscSum > 0 ? `
+    <tr>
+      <td style="padding:4px 6px;color:#2e7d32">Line Discounts</td>
+      <td style="padding:4px 6px;text-align:right;color:#2e7d32">− BHD ${lineDiscSum.toFixed(3)}</td>
+    </tr>` : ''}
+    ${overallDisc > 0 ? `
+    <tr>
+      <td style="padding:4px 6px;color:#2e7d32">${inv.type === 'quotation' || inv.type === 'proforma' ? 'Overall Discount' : 'Invoice Discount'}</td>
+      <td style="padding:4px 6px;text-align:right;color:#2e7d32">− BHD ${overallDisc.toFixed(3)}</td>
+    </tr>` : ''}
+    ${totalDiscount > 0 ? `
+    <tr style="border-top:1px dashed #e0e0e0">
+      <td style="padding:4px 6px;color:#555;font-size:10px">Net Taxable Amount</td>
+      <td style="padding:4px 6px;text-align:right;font-size:10px">BHD ${netTaxable.toFixed(3)}</td>
+    </tr>` : ''}
+    <tr>
+      <td style="padding:4px 6px;color:#c62828">VAT (10%)</td>
+      <td style="padding:4px 6px;text-align:right;color:#c62828">BHD ${totalVat.toFixed(3)}</td>
+    </tr>
+    ${shipping > 0 ? `
+    <tr>
+      <td style="padding:4px 6px;color:#666">Shipping</td>
+      <td style="padding:4px 6px;text-align:right">BHD ${shipping.toFixed(3)}</td>
+    </tr>` : ''}
+    <tr style="border-top:2px solid ${brand}">
+      <td style="padding:7px 6px 4px;font-size:13px;font-weight:700;color:${brand}">Total</td>
+      <td style="padding:7px 6px 4px;text-align:right;font-size:13px;font-weight:700;color:${brand}">BHD ${grandTotal.toFixed(3)}</td>
+    </tr>
+    ${s.showBalance && inv.type !== 'quotation' && inv.type !== 'proforma' ? `
+    <tr style="border-top:1px solid #eee">
+      <td style="padding:5px 6px;color:#666">Balance Due</td>
+      <td style="padding:5px 6px;text-align:right">
+        <span style="display:inline-block;padding:2px 12px;border-radius:20px;font-weight:700;font-size:11px;background:${scBgV};color:${sc}">BHD ${balance.toFixed(3)}</span>
+      </td>
+    </tr>` : ''}
   </table>
 </div>
 
-${linkedDns ? `<div class="dns">📦 This invoice covers Delivery Notes: ${linkedDns}</div>` : ''}
-${inv.notes ? `<div class="notes"><strong>Notes:</strong> ${esc(inv.notes)}</div>` : ''}
+${linkedDns ? `<div style="padding:${secPad};font-size:10px;color:#666;border-top:1px solid #f0f0f0">Delivery Notes covered: ${linkedDns}</div>` : ''}
+${inv.notes ? `<div style="padding:${secPad};border-top:1px solid #f0f0f0"><div style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#aaa;margin-bottom:4px">Notes</div><div style="font-size:10.5px;color:#444">${esc(inv.notes)}</div></div>` : ''}
 
-<div class="bank">
-  <strong>Payment:</strong>
-  ${esc(co.bank_name||'Bank of Bahrain and Kuwait (BBK)')} &nbsp;|&nbsp;
-  IBAN: ${esc(co.bank_iban||'—')} &nbsp;|&nbsp;
-  SWIFT: ${esc(co.bank_swift||'—')}
-</div>
+${s.showBank && (co.bank_name || co.bank_iban) ? `
+<div style="padding:${secPad};border-top:1px solid #f0f0f0;font-size:10px;color:#555">
+  <span style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:#aaa">Payment &nbsp;</span>
+  ${co.bank_name ? esc(co.bank_name) : ''}${co.bank_iban ? ` · IBAN: ${esc(co.bank_iban)}` : ''}${co.bank_swift ? ` · SWIFT: ${esc(co.bank_swift)}` : ''}
+</div>` : ''}
 
-<div class="ftr">
-  ${esc(co.name||'Al Manama Electrical Trading Co. W.L.L')} &nbsp;|&nbsp;
-  VAT: ${esc(co.vat_number||'')} &nbsp;|&nbsp; CR: ${esc(co.cr_number||'')} <br>
-  ${meta.footer}
+<div style="margin-top:auto;border-top:1px solid #e4e4e4;padding:8px 24px;display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#aaa">
+  <div>${esc(co.name || '')}${co.vat_number ? ` · VAT: ${esc(co.vat_number)}` : ''}${co.cr_number ? ` · CR: ${esc(co.cr_number)}` : ''}</div>
+  <div style="font-style:italic">${esc(footerText)}</div>
 </div>
 </body></html>`
 }
 
-function dnHtml(dn) {
+// ─────────────────────────────────────────────
+//  DELIVERY NOTE
+// ─────────────────────────────────────────────
+function dnHtml(dn, { forPrint = false } = {}) {
   const co    = dn.company || {}
   const items = dn.items   || []
-  const brand = (co.theme_color && /^#[0-9a-fA-F]{6}$/.test(co.theme_color)) ? co.theme_color : '#00695c'
+  const brand = (co.theme_color && /^#[0-9a-fA-F]{6}$/.test(co.theme_color)) ? co.theme_color : '#1a5fa8'
+  const s     = getSettings(co)
 
-  const rows = items.map((it,i) => `
-    <tr class="${i%2?'s':''}">
-      <td>${i+1}</td>
-      <td>${esc(it.part_no||'')}</td>
-      <td>${esc(it.description||it.product_name||'')}</td>
-      <td class="r">${parseFloat(it.qty_ordered||0).toFixed(3)}</td>
-      <td class="r">${parseFloat(it.qty_delivered||0).toFixed(3)}</td>
-      <td>${esc(it.unit||'')}</td>
+  const compact = s.template === 'compact'
+  const classic = s.template === 'classic'
+  const fs      = compact ? '9.5px'    : '11px'
+  const hPad    = compact ? '12px 18px' : '20px 24px'
+  const sPad    = compact ? '10px 18px' : '16px 24px'
+  const secPad  = compact ? '8px 18px'  : '10px 24px'
+  const rowPad  = compact ? '3.5px 5px' : '5.5px 6px'
+  const thPad   = compact ? '4px 5px'   : '6px 6px'
+
+  const rows = items.map((it, i) => `
+    <tr>
+      <td style="color:#999;text-align:center;padding:${rowPad}">${i + 1}</td>
+      ${s.showPartNo ? `<td style="color:#555;padding:${rowPad}">${esc(it.part_no || '')}</td>` : ''}
+      <td style="padding:${rowPad}">${esc(it.description || it.product_name || '')}</td>
+      <td style="text-align:right;padding:${rowPad}">${parseFloat(it.qty_ordered   || 0).toFixed(3)}</td>
+      <td style="text-align:right;font-weight:600;padding:${rowPad}">${parseFloat(it.qty_delivered || 0).toFixed(3)}</td>
+      ${s.showUnit ? `<td style="color:#777;padding:${rowPad}">${esc(it.unit || '')}</td>` : ''}
     </tr>`).join('')
+
+  const coMeta  = `${esc(co.address || '')}${co.tel ? ` · Tel: ${esc(co.tel)}` : ''}<br>${co.vat_number ? `VAT Reg: ${esc(co.vat_number)}` : ''}${co.cr_number ? ` · CR: ${esc(co.cr_number)}` : ''}`
+  const logoImg = co.logo ? `<img src="${co.logo}" alt="" style="height:${compact?'44px':'56px'};max-width:120px;object-fit:contain">` : ''
+
+  const headerHtml = classic ? `
+<div style="background:${brand};color:#fff;padding:${hPad};display:flex;justify-content:space-between;align-items:flex-start">
+  <div style="display:flex;gap:12px;align-items:flex-start">
+    ${co.logo ? `<img src="${co.logo}" alt="" style="height:${compact?'44px':'52px'};max-width:120px;object-fit:contain;background:rgba(255,255,255,.15);border-radius:3px;padding:3px">` : ''}
+    <div>
+      <div style="font-size:${compact?'13px':'15px'};font-weight:700">${esc(co.name || '')}</div>
+      ${s.bilingual && co.name_ar ? `<div style="font-size:11px;margin-top:2px;opacity:.8">${esc(co.name_ar)}</div>` : ''}
+      <div style="font-size:9px;margin-top:4px;opacity:.75;line-height:1.8">${coMeta}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:${compact?'17px':'21px'};font-weight:700;background:rgba(255,255,255,.15);padding:${compact?'5px 12px':'7px 16px'};border-radius:4px;display:inline-block">DELIVERY NOTE</div>
+    ${s.bilingual ? `<div style="font-size:10px;opacity:.8;margin-top:4px">مذكرة تسليم</div>` : ''}
+    <div style="font-size:13px;font-weight:700;margin-top:6px">${esc(dn.dn_no || '')}</div>
+  </div>
+</div>` : `
+<div style="height:4px;background:${brand}"></div>
+<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:${hPad};border-bottom:1px solid #ebebeb">
+  <div style="display:flex;gap:14px;align-items:flex-start">
+    ${logoImg}
+    <div>
+      <div style="font-size:${compact?'13px':'14px'};font-weight:700;color:#111;line-height:1.3">${esc(co.name || '')}</div>
+      ${s.bilingual && co.name_ar ? `<div style="font-size:11px;color:#777;margin-top:2px">${esc(co.name_ar)}</div>` : ''}
+      <div style="font-size:9px;color:#888;margin-top:5px;line-height:1.8">${coMeta}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:${compact?'18px':'22px'};font-weight:700;color:${brand};letter-spacing:-.5px;line-height:1.1">DELIVERY NOTE</div>
+    ${s.bilingual ? `<div style="font-size:11px;color:#aaa;margin-top:2px">مذكرة تسليم</div>` : ''}
+    <div style="font-size:13px;font-weight:700;color:#333;margin-top:6px">${esc(dn.dn_no || '')}</div>
+  </div>
+</div>`
+
+  const footerText = s.footer || 'This delivery note does not constitute a tax invoice · هذا ليس فاتورة ضريبية'
+
+  const pageSize = forPrint ? '9.5in 11in' : 'A4'
+  const margin   = forPrint ? '5mm' : '0'
+  const minH     = forPrint ? 'calc(11in - 10mm)' : '273mm'
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Delivery Note ${esc(dn.dn_no||'')}</title>
+<title>Delivery Note ${esc(dn.dn_no || '')}</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11.5px;color:#1a1a1a;background:#fff}
-  .hdr{background:${brand};color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:flex-start}
-  .co-name{font-size:15px;font-weight:700}
-  .co-ar{font-size:12px;margin-top:3px;opacity:.85}
-  .co-meta{font-size:9.5px;margin-top:5px;opacity:.8;line-height:1.6}
-  .dn-box{background:#fff;color:${brand};padding:8px 14px;border-radius:4px;text-align:center;min-width:140px}
-  .dn-box-title{font-size:13px;font-weight:700}
-  .info{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 18px;background:#f8f8f8;border-bottom:1px solid #e0e0e0}
-  .box{background:#fff;border:1px solid #e0e0e0}
-  .box-hd{background:${brand};color:#fff;padding:3px 8px;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
-  .box-body{padding:8px}
-  .meta-tbl{width:100%;font-size:10.5px;border-collapse:collapse}
-  .meta-tbl td{padding:2px 0}
-  .meta-tbl td:last-child{text-align:right;font-weight:600}
-  table.items{width:calc(100% - 36px);border-collapse:collapse;font-size:11px;margin:10px 18px}
-  table.items th{background:${brand};color:#fff;padding:5px;text-align:left;font-size:10.5px}
-  table.items th.r,table.items td.r{text-align:right}
-  table.items td{padding:4px 5px;border-bottom:1px solid #e8e8e8}
-  table.items tr.s{background:#f7f7f7}
-  .notice{margin:10px 18px;padding:8px 12px;background:#fff8e1;border-left:4px solid #f57c00;font-size:10.5px;color:#5d4037}
-  .sigs{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:12px 18px}
-  .sig-box{border:1px solid #ddd;padding:10px;background:#f8f8f8}
-  .sig-lbl{font-size:10px;font-weight:700;color:#555;margin-bottom:20px}
-  .sig-line{border-top:1px solid #bbb;margin-top:16px;padding-top:4px;font-size:9px;color:#888}
-  .ftr{background:${brand};color:#cce8e0;padding:6px 18px;font-size:9.5px;text-align:center;margin-top:10px}
-  .print-btn{position:fixed;top:12px;right:12px;padding:8px 16px;background:${brand};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:13px;font-weight:600;z-index:999}
-  @media print{.print-btn{display:none}@page{margin:10mm;size:A4}}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:${fs};color:#222;background:#fff;display:flex;flex-direction:column;min-height:${minH}}
+  table.items{width:100%;border-collapse:collapse}
+  table.items thead tr{border-bottom:2px solid ${brand}}
+  table.items th{text-align:left;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:${brand};padding:${thPad}}
+  table.items th.r{text-align:right}
+  table.items tbody tr:nth-child(even) td{background:#fafafa}
+  table.items tbody tr td{border-bottom:1px solid #f0f0f0;vertical-align:top}
+  @media print{@page{margin:${margin};size:${pageSize}}}
 </style>
 </head>
 <body>
-<button class="print-btn" onclick="window.print()">🖨 Print / Save PDF</button>
+${forPrint ? printControls(brand) : ''}
+${headerHtml}
 
-<div class="hdr">
-  <div style="display:flex;align-items:center;gap:12px">
-    ${co.logo ? `<img src="${co.logo}" alt="logo" style="height:54px;max-width:160px;object-fit:contain;background:#fff;border-radius:3px;padding:3px">` : ''}
-    <div>
-      <div class="co-name">${esc(co.name||'')}</div>
-      ${co.name_ar ? `<div class="co-ar">${esc(co.name_ar)}</div>` : ''}
-      <div class="co-meta">
-        ${esc(co.address||'')}${co.tel ? ` &nbsp;|&nbsp; Tel: ${esc(co.tel)}` : ''}
-        ${co.vat_number ? ` &nbsp;|&nbsp; VAT: ${esc(co.vat_number)}` : ''}
-        ${co.cr_number  ? ` &nbsp;|&nbsp; CR: ${esc(co.cr_number)}`  : ''}
-      </div>
+<div style="display:grid;grid-template-columns:1fr 1fr;padding:${sPad};border-bottom:1px solid #ebebeb;background:#fafafa">
+  <div>
+    <div style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:${brand};margin-bottom:5px">Deliver To</div>
+    <div style="font-size:${compact?'11px':'12px'};font-weight:700;color:#111;margin-bottom:3px">${esc(dn.customer_name || '')}</div>
+    <div style="font-size:9.5px;color:#777;line-height:1.7">
+      ${esc(dn.delivery_address || dn.customer_address || '')}
+      ${dn.project_ref ? `<br>Project: ${esc(dn.project_ref)}` : ''}
     </div>
   </div>
-  <div class="dn-box">
-    <div class="dn-box-title">DELIVERY NOTE</div>
-    <div style="font-size:9px;color:#888;margin-top:2px">مذكرة تسليم</div>
+  <div style="padding-left:24px;border-left:1px solid #e4e4e4">
+    <div style="font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:${brand};margin-bottom:5px">Delivery Details</div>
+    ${[
+      ['DN No.',        esc(dn.dn_no || '')],
+      ['Date',          fmtDate(dn.dn_date)],
+      ['PO Reference',  esc(dn.po_reference || '—')],
+      dn.delivered_by        ? ['Delivered By',  esc(dn.delivered_by)]        : null,
+      dn.linked_invoice_no   ? ['Invoice Ref',   esc(dn.linked_invoice_no)]   : null,
+    ].filter(Boolean).map(([lbl, val]) => `
+      <div style="display:flex;justify-content:space-between;font-size:10px;padding:2.5px 0;border-bottom:1px dotted #eee">
+        <span style="color:#888">${lbl}</span><span style="font-weight:600;color:#222">${val}</span>
+      </div>`).join('')}
   </div>
 </div>
 
-<div class="info">
-  <div class="box">
-    <div class="box-hd">Deliver To</div>
-    <div class="box-body">
-      <div style="font-size:12px;font-weight:700;margin-bottom:4px">${esc(dn.customer_name||'')}</div>
-      <div style="font-size:10px;color:#666;line-height:1.7">
-        ${esc(dn.delivery_address||dn.customer_address||'—')}<br>
-        Project: ${esc(dn.project_ref||'—')}
-      </div>
-    </div>
-  </div>
-  <div class="box">
-    <div class="box-hd">Delivery Details</div>
-    <div class="box-body">
-      <table class="meta-tbl">
-        <tr><td>DN No.</td><td>${esc(dn.dn_no||'')}</td></tr>
-        <tr><td>Date</td><td>${fmtDate(dn.dn_date)}</td></tr>
-        <tr><td>PO Reference</td><td>${esc(dn.po_reference||'Pending')}</td></tr>
-        <tr><td>Delivered By</td><td>${esc(dn.delivered_by||'—')}</td></tr>
-      </table>
-    </div>
-  </div>
-</div>
-
+<div style="padding:${compact?'10px 18px 0':'14px 24px 0'}">
 <table class="items">
-  <thead><tr>
-    <th>#</th><th>Part No.</th><th>Description</th>
-    <th class="r">Qty Ordered</th><th class="r">Qty Delivered</th><th>Unit</th>
-  </tr></thead>
+  <thead>
+    <tr>
+      <th style="width:24px;text-align:center">#</th>
+      ${s.showPartNo ? `<th>Part No.</th>` : ''}
+      <th>Description</th>
+      <th class="r">Qty Ordered</th>
+      <th class="r">Qty Delivered</th>
+      ${s.showUnit ? `<th>Unit</th>` : ''}
+    </tr>
+  </thead>
   <tbody>${rows}</tbody>
 </table>
-
-<div class="notice">
-  <strong>This is not a tax invoice.</strong> Invoice will be raised upon receipt of client PO.
-  ${dn.linked_invoice_no ? `&nbsp;|&nbsp; Invoiced under: <strong>${esc(dn.linked_invoice_no)}</strong>` : ''}
 </div>
 
-<div class="sigs">
-  <div class="sig-box">
-    <div class="sig-lbl">Prepared By</div>
-    <div class="sig-line">Signature / Date</div>
-  </div>
-  <div class="sig-box">
-    <div class="sig-lbl">Delivered By / Driver</div>
-    <div style="font-size:10px;margin-bottom:12px">${esc(dn.delivered_by||'')}</div>
-    <div class="sig-line">Signature / Date</div>
-  </div>
-  <div class="sig-box">
-    <div class="sig-lbl">Received By (Client)</div>
-    <div class="sig-line">Name / Signature / Date</div>
-  </div>
+<div style="margin:${compact?'10px 18px 0':'14px 24px 0'};padding:8px 12px;background:#fffbeb;border-left:3px solid #f59e0b;font-size:10px;color:#6b4c00;border-radius:0 4px 4px 0">
+  <strong>This is not a tax invoice.</strong> &nbsp; A tax invoice will be issued upon receipt of official purchase order.
 </div>
 
-<div class="ftr">
-  ${esc(co.name||'')} &nbsp;|&nbsp;
-  ${co.vat_number ? `VAT: ${esc(co.vat_number)} &nbsp;|&nbsp;` : ''}
-  This delivery note does not constitute a tax invoice &nbsp;|&nbsp; هذا ليس فاتورة ضريبية
+${s.showSigs ? `
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin:${compact?'12px 18px 0':'16px 24px 0'}">
+  ${[
+    ['Prepared By', ''],
+    ['Delivered By', dn.delivered_by || ''],
+    ['Received By (Client)', ''],
+  ].map(([lbl, name]) => `
+  <div style="border:1px solid #e4e4e4;padding:${compact?'8px':'12px'};border-radius:4px">
+    <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#888;margin-bottom:${compact?'12px':'16px'}">${lbl}</div>
+    ${name ? `<div style="font-size:10px;color:#444;margin-bottom:8px">${esc(name)}</div>` : ''}
+    <div style="border-top:1px solid #ccc;margin-top:${compact?'10px':'14px'};padding-top:4px;font-size:8.5px;color:#aaa">Name / Signature / Date</div>
+  </div>`).join('')}
+</div>` : ''}
+
+<div style="margin-top:auto;border-top:1px solid #e4e4e4;padding:8px 24px;display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#aaa;${s.showSigs?'':'margin-top:16px'}">
+  <div>${esc(co.name || '')}${co.vat_number ? ` · VAT: ${esc(co.vat_number)}` : ''}${co.cr_number ? ` · CR: ${esc(co.cr_number)}` : ''}</div>
+  <div style="font-style:italic">${esc(footerText)}</div>
 </div>
 </body></html>`
 }
 
-function esc(str) {
-  return String(str||'')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+// ─────────────────────────────────────────────
+//  STATEMENT OF ACCOUNTS
+// ─────────────────────────────────────────────
+function statementHtml(data, { forPrint = false } = {}) {
+  const co       = data.company   || {}
+  const customer = data.customer  || {}
+  const rows     = data.rows      || []
+  const brand    = (co.theme_color && /^#[0-9a-fA-F]{6}$/.test(co.theme_color)) ? co.theme_color : '#1a5fa8'
+
+  const ob  = parseFloat(data.opening_balance || 0)
+  const cb  = parseFloat(data.closing_balance || 0)
+  const td  = parseFloat(data.totals?.debit   || 0)
+  const tc  = parseFloat(data.totals?.credit  || 0)
+
+  const fmtBhd = (v) => 'BHD ' + parseFloat(v || 0).toFixed(3)
+  const colorBal = (v) => v > 0.001 ? '#c62828' : v < -0.001 ? '#2e7d32' : '#333'
+
+  const TXN_LABEL = { invoice: 'Invoice', credit_note: 'Credit Note', payment: 'Payment' }
+  const METHOD_LABEL = { cash: 'Cash', bank_transfer: 'Bank Transfer', cheque: 'Cheque', card: 'Card', other: 'Other' }
+  const TXN_COLOR = { invoice: brand, credit_note: '#6a1b9a', payment: '#2e7d32' }
+  const TXN_BG    = { invoice: '#e8f0fb', credit_note: '#f3e5f5', payment: '#e8f5e9' }
+
+  const txnRows = rows.map((r, i) => {
+    const label  = TXN_LABEL[r.txn_type]  || r.txn_type
+    const color  = TXN_COLOR[r.txn_type]  || brand
+    const bg     = TXN_BG[r.txn_type]     || '#eee'
+    const method = r.txn_type === 'payment'
+      ? (METHOD_LABEL[r.doc_type] || r.doc_type || '')
+      : (r.doc_type === 'tax_invoice' ? 'Tax Invoice' : r.doc_type === 'credit_note' ? 'Credit Note' : r.doc_type || '')
+    const debit  = parseFloat(r.debit  || 0)
+    const credit = parseFloat(r.credit || 0)
+    const bal    = parseFloat(r.balance || 0)
+    return `
+    <tr style="background:${i % 2 === 0 ? '#fff' : '#fafafa'}">
+      <td>${fmtDate(r.txn_date)}</td>
+      <td><span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:9px;font-weight:700;background:${bg};color:${color}">${esc(label)}</span></td>
+      <td style="font-family:monospace;font-size:10px">${esc(r.ref_no || '')}</td>
+      <td style="color:#666;font-size:10px">${esc(method)}${r.notes ? ` <span style="color:#bbb">— ${esc(r.notes)}</span>` : ''}</td>
+      <td style="text-align:right;color:${debit > 0 ? '#c62828' : '#bbb'}">${debit > 0 ? debit.toFixed(3) : '—'}</td>
+      <td style="text-align:right;color:${credit > 0 ? '#2e7d32' : '#bbb'}">${credit > 0 ? credit.toFixed(3) : '—'}</td>
+      <td style="text-align:right;font-weight:600;color:${colorBal(bal)}">${bal.toFixed(3)}</td>
+    </tr>`
+  }).join('')
+
+  const summaryCards = [
+    ['Opening Balance', fmtBhd(ob), colorBal(ob)],
+    ['Total Invoiced',  fmtBhd(td), brand],
+    ['Total Received',  fmtBhd(tc), '#2e7d32'],
+    ['Closing Balance', fmtBhd(cb), colorBal(cb)],
+  ].map(([label, value, color]) => `
+    <div style="background:#f8f8f8;border:1px solid #e0e0e0;border-radius:4px;padding:8px 12px;text-align:center">
+      <div style="font-size:8.5px;color:#888;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:3px">${label}</div>
+      <div style="font-size:13px;font-weight:700;color:${color}">${esc(value)}</div>
+    </div>`).join('')
+
+  const bankSection = (co.bank_iban || co.bank_name) ? `
+  <div style="margin-top:14px;padding:8px 12px;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:3px;font-size:10px">
+    <div style="font-weight:700;margin-bottom:4px">Payment Details:</div>
+    <div style="display:flex;gap:24px;flex-wrap:wrap">
+      ${co.bank_name      ? `<span><strong>Bank:</strong> ${esc(co.bank_name)}</span>` : ''}
+      ${co.bank_acct_name ? `<span><strong>Account:</strong> ${esc(co.bank_acct_name)}</span>` : ''}
+      ${co.bank_iban      ? `<span><strong>IBAN:</strong> ${esc(co.bank_iban)}</span>` : ''}
+      ${co.bank_swift     ? `<span><strong>SWIFT:</strong> ${esc(co.bank_swift)}</span>` : ''}
+    </div>
+  </div>` : ''
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Statement of Account — ${esc(customer.name || '')}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:11px;color:#222;background:#fff;padding:20px 24px}
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  thead tr{background:${brand};color:#fff}
+  th{padding:6px 8px;text-align:left;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.4px}
+  th.r,td.r{text-align:right}
+  td{padding:5px 8px;border-bottom:1px solid #eee}
+  .ob-row td{background:#fff8e1!important;font-style:italic;color:#5d4037}
+  .foot-row td{font-weight:700;border-top:2px solid ${brand};background:#fff!important}
+  @media print{@page{margin:12mm;size:A4}body{padding:0}}
+</style>
+</head>
+<body>
+${forPrint ? printControls(brand) : ''}
+
+<!-- Letterhead -->
+<div style="display:flex;justify-content:space-between;border-bottom:2px solid ${brand};padding-bottom:10px;margin-bottom:14px">
+  <div>
+    <div style="font-size:15px;font-weight:700;color:${brand}">${esc(co.name || '')}</div>
+    ${co.name_ar ? `<div style="font-size:12px;color:#555;direction:rtl">${esc(co.name_ar)}</div>` : ''}
+    <div style="font-size:10px;color:#666;margin-top:3px">${[co.address, co.tel, co.email].filter(Boolean).map(esc).join(' | ')}</div>
+    <div style="font-size:10px;color:#666">
+      ${co.vat_number ? `VAT Reg: ${esc(co.vat_number)}` : ''}
+      ${co.cr_number  ? ` | CR: ${esc(co.cr_number)}`    : ''}
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:16px;font-weight:700;color:#333">STATEMENT OF ACCOUNT</div>
+    <div style="font-size:11px;color:#666;margin-top:4px">Period: ${fmtDate(data.period?.from)} – ${fmtDate(data.period?.to)}</div>
+    <div style="font-size:10px;color:#888;margin-top:2px">Printed: ${fmtDate(new Date().toISOString())}</div>
+  </div>
+</div>
+
+<!-- Customer + summary cards -->
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+  <div style="background:#f8f8f8;border:1px solid #e0e0e0;border-radius:3px;padding:8px 12px">
+    <div style="font-size:9px;color:#888;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Bill To</div>
+    <div style="font-weight:700;font-size:13px">${esc(customer.name || '')}</div>
+    <div style="font-size:11px;color:#555">Code: ${esc(customer.code || '')}</div>
+    ${customer.address    ? `<div style="font-size:10px;color:#555">${esc(customer.address)}</div>` : ''}
+    ${customer.tel        ? `<div style="font-size:10px;color:#555">Tel: ${esc(customer.tel)}</div>` : ''}
+    ${customer.email      ? `<div style="font-size:10px;color:#555">${esc(customer.email)}</div>` : ''}
+    ${customer.vat_number ? `<div style="font-size:10px;color:#555">VAT: ${esc(customer.vat_number)}</div>` : ''}
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">${summaryCards}</div>
+</div>
+
+<!-- Transactions table -->
+<table>
+  <thead>
+    <tr>
+      <th style="width:80px">Date</th>
+      <th style="width:90px">Type</th>
+      <th>Reference</th>
+      <th>Method / Doc</th>
+      <th class="r" style="width:100px">Debit (BHD)</th>
+      <th class="r" style="width:100px">Credit (BHD)</th>
+      <th class="r" style="width:110px">Balance (BHD)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <!-- Opening balance -->
+    <tr class="ob-row">
+      <td>${fmtDate(data.period?.from)}</td>
+      <td colspan="3" style="color:#5d4037">Opening Balance</td>
+      <td class="r" style="color:#5d4037">—</td>
+      <td class="r" style="color:#5d4037">—</td>
+      <td class="r" style="font-weight:700;color:${colorBal(ob)}">${ob.toFixed(3)}</td>
+    </tr>
+    ${rows.length === 0 ? `<tr><td colspan="7" style="text-align:center;color:#aaa;padding:20px 0">No transactions in this period</td></tr>` : txnRows}
+    <!-- Closing balance -->
+    <tr class="foot-row">
+      <td colspan="4" style="color:${brand}">Closing Balance — ${fmtDate(data.period?.to)}</td>
+      <td class="r">${td.toFixed(3)}</td>
+      <td class="r">${tc.toFixed(3)}</td>
+      <td class="r" style="font-size:12px;color:${colorBal(cb)}">${cb.toFixed(3)}</td>
+    </tr>
+  </tbody>
+</table>
+
+${bankSection}
+
+<div style="margin-top:12px;font-size:9px;color:#aaa;text-align:center;border-top:1px solid #eee;padding-top:8px">
+  This statement is computer generated and does not require a signature. Please contact us if you have any queries.
+</div>
+</body></html>`
 }
 
-// Public API — return HTML buffer (browser opens and user prints to PDF)
-exports.generateInvoicePdf = async (inv) => Buffer.from(invoiceHtml(inv))
-exports.generateDnPdf      = async (dn)  => Buffer.from(dnHtml(dn))
+// Public API — real PDF buffers (A4, puppeteer)
+exports.generateInvoicePdf   = (inv)  => htmlToPdf(invoiceHtml(inv))
+exports.generateDnPdf        = (dn)   => htmlToPdf(dnHtml(dn))
+exports.generateStatementPdf = (data) => htmlToPdf(statementHtml(data))
 
-// Content type for routes
-exports.contentType = 'text/html; charset=utf-8'
+// Browser-print HTML (9.5"×11" dot-matrix / direct print)
+exports.invoicePrintHtml   = (inv)  => Buffer.from(invoiceHtml(inv,       { forPrint: true }))
+exports.dnPrintHtml        = (dn)   => Buffer.from(dnHtml(dn,             { forPrint: true }))
+exports.statementPrintHtml = (data) => Buffer.from(statementHtml(data,    { forPrint: true }))

@@ -17,17 +17,63 @@ const TYPE_LABELS = {
 }
 
 // ── Payments sub-tab ──────────────────────────────────────────
+const EMPTY_PF = () => ({ payment_date: new Date().toISOString().split('T')[0], amount: '', method: 'bank_transfer', reference: '', notes: '' })
+
+function PaymentMethodSelect({ value, onChange }) {
+  return (
+    <select value={value} onChange={onChange}>
+      <option value="bank_transfer">Bank Transfer</option>
+      <option value="cash">Cash</option>
+      <option value="cheque">Cheque</option>
+      <option value="card">Card</option>
+      <option value="other">Other</option>
+    </select>
+  )
+}
+
+function PaymentForm({ title, pf, onChange, onSave, onCancel, saving }) {
+  const PF = (k, v) => onChange(f => ({ ...f, [k]: v }))
+  return (
+    <div style={{ background:'#f8f9fa', border:'1px solid #e0e0e0', borderRadius:4, padding:12, marginTop:8 }}>
+      <div style={{ fontWeight:700, fontSize:12, marginBottom:8 }}>{title}</div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8, marginBottom:8 }}>
+        <div className="field"><label>Date</label><input type="date" value={pf.payment_date} onChange={e=>PF('payment_date',e.target.value)}/></div>
+        <div className="field"><label>Amount BHD</label><input type="number" step="0.001" value={pf.amount} onChange={e=>PF('amount',e.target.value)}/></div>
+        <div className="field"><label>Method</label><PaymentMethodSelect value={pf.method} onChange={e=>PF('method',e.target.value)}/></div>
+        <div className="field"><label>Reference</label><input value={pf.reference||''} onChange={e=>PF('reference',e.target.value)} placeholder="Chq/Txn no."/></div>
+      </div>
+      <div className="field" style={{ marginBottom:8 }}>
+        <label>Notes</label>
+        <input value={pf.notes||''} onChange={e=>PF('notes',e.target.value)} placeholder="Optional notes"/>
+      </div>
+      <div style={{ display:'flex', gap:8 }}>
+        <button className="btn primary" onClick={onSave} disabled={saving || !pf.amount}>
+          {saving ? '⏳ Saving…' : '💾 Save'}
+        </button>
+        <button className="btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  )
+}
+
 function PaymentsTab({ invoiceId, grandTotal }) {
   const qc = useQueryClient()
-  const [showForm, setShowForm] = useState(false)
-  const [pf, setPf] = useState({ payment_date: new Date().toISOString().split('T')[0], amount: '', method: 'bank_transfer', reference: '', notes: '' })
-  const PF = (k, v) => setPf(f => ({ ...f, [k]: v }))
+  const [showAddForm, setShowAddForm]   = useState(false)
+  const [editingId,   setEditingId]     = useState(null)
+  const [pf,          setPf]            = useState(EMPTY_PF())
+  const [editPf,      setEditPf]        = useState(null)
+  const [confirmDel,  setConfirmDel]    = useState(null)   // payment id pending delete
 
   const { data: payments, isLoading } = useQuery({
     queryKey: ['invoice-payments', invoiceId],
     queryFn:  () => invoiceApi.getPayments(invoiceId).then(r => r.data.data),
     enabled:  !!invoiceId,
   })
+
+  const invalidate = () => {
+    qc.invalidateQueries(['invoice-payments', invoiceId])
+    qc.invalidateQueries(['invoices'])
+  }
 
   const totalPaid = (payments || []).reduce((s, p) => s + parseFloat(p.amount || 0), 0)
   const balance   = grandTotal - totalPaid
@@ -36,12 +82,45 @@ function PaymentsTab({ invoiceId, grandTotal }) {
     mutationFn: () => invoiceApi.addPayment(invoiceId, pf),
     onSuccess: () => {
       toast.success('Payment recorded')
-      qc.invalidateQueries(['invoice-payments', invoiceId])
-      qc.invalidateQueries(['invoices'])
-      setShowForm(false)
-      setPf({ payment_date: new Date().toISOString().split('T')[0], amount: '', method: 'bank_transfer', reference: '', notes: '' })
+      invalidate()
+      setShowAddForm(false)
+      setPf(EMPTY_PF())
     },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Failed to record payment'),
   })
+
+  const updateMut = useMutation({
+    mutationFn: () => invoiceApi.updatePayment(invoiceId, editingId, editPf),
+    onSuccess: () => {
+      toast.success('Payment updated')
+      invalidate()
+      setEditingId(null)
+      setEditPf(null)
+    },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Failed to update payment'),
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (pid) => invoiceApi.deletePayment(invoiceId, pid),
+    onSuccess: () => {
+      toast.success('Payment deleted')
+      invalidate()
+      setConfirmDel(null)
+    },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Failed to delete payment'),
+  })
+
+  const startEdit = (p) => {
+    setShowAddForm(false)
+    setEditingId(p.id)
+    setEditPf({
+      payment_date: p.payment_date ? p.payment_date.split('T')[0] : '',
+      amount:       parseFloat(p.amount).toFixed(3),
+      method:       p.method || 'bank_transfer',
+      reference:    p.reference_no || '',
+      notes:        p.notes || '',
+    })
+  }
 
   if (!invoiceId) return (
     <div style={{ padding:16, color:'#888', fontSize:12 }}>
@@ -66,60 +145,72 @@ function PaymentsTab({ invoiceId, grandTotal }) {
 
       <table className="data-table" style={{ fontSize:12, marginBottom:8 }}>
         <thead><tr>
-          <th>Date</th><th>Method</th><th className="right">Amount BHD</th><th>Reference</th><th>Notes</th>
+          <th>Date</th><th>Method</th><th className="right">Amount BHD</th><th>Reference</th><th>Notes</th><th style={{ width:72 }}></th>
         </tr></thead>
         <tbody>
-          {isLoading && <tr className="empty-row"><td colSpan={5}>Loading…</td></tr>}
-          {!isLoading && !(payments||[]).length && <tr className="empty-row"><td colSpan={5}>No payments recorded yet</td></tr>}
+          {isLoading && <tr className="empty-row"><td colSpan={6}>Loading…</td></tr>}
+          {!isLoading && !(payments||[]).length && <tr className="empty-row"><td colSpan={6}>No payments recorded yet</td></tr>}
           {(payments||[]).map(p => (
-            <tr key={p.id}>
-              <td>{fmtDate(p.payment_date)}</td>
-              <td style={{ textTransform:'capitalize' }}>{(p.method||'').replace(/_/g,' ')}</td>
-              <td className="right" style={{ fontWeight:600 }}>BHD {parseFloat(p.amount).toFixed(3)}</td>
-              <td>{p.reference_no || p.reference || '—'}</td>
-              <td style={{ color:'#888', fontSize:11 }}>{p.notes || ''}</td>
-            </tr>
+            editingId === p.id ? (
+              <tr key={p.id}>
+                <td colSpan={6} style={{ padding:0 }}>
+                  <PaymentForm
+                    title="Edit Payment"
+                    pf={editPf}
+                    onChange={setEditPf}
+                    onSave={() => updateMut.mutate()}
+                    onCancel={() => { setEditingId(null); setEditPf(null) }}
+                    saving={updateMut.isPending}
+                  />
+                </td>
+              </tr>
+            ) : (
+              <tr key={p.id}>
+                <td>{fmtDate(p.payment_date)}</td>
+                <td style={{ textTransform:'capitalize' }}>{(p.method||'').replace(/_/g,' ')}</td>
+                <td className="right" style={{ fontWeight:600 }}>BHD {parseFloat(p.amount).toFixed(3)}</td>
+                <td>{p.reference_no || '—'}</td>
+                <td style={{ color:'#888', fontSize:11 }}>{p.notes || ''}</td>
+                <td style={{ whiteSpace:'nowrap' }}>
+                  <button className="btn icon-btn" title="Edit" onClick={() => startEdit(p)} style={{ fontSize:12, padding:'2px 6px', marginRight:2 }}>✎</button>
+                  <button className="btn icon-btn danger" title="Delete" onClick={() => setConfirmDel(p.id)} style={{ fontSize:12, padding:'2px 6px', color:'#c62828' }}>✕</button>
+                </td>
+              </tr>
+            )
           ))}
         </tbody>
       </table>
 
-      {!showForm && balance > 0.001 && (
-        <button className="btn primary" onClick={() => { setPf(f => ({ ...f, amount: balance.toFixed(3) })); setShowForm(true) }}>
+      {/* Delete confirmation */}
+      {confirmDel && (
+        <div style={{ background:'#fff3e0', border:'1px solid #ffb74d', borderRadius:4, padding:'8px 12px', marginBottom:8, fontSize:12, display:'flex', alignItems:'center', gap:12 }}>
+          <span>Delete this payment record? This cannot be undone.</span>
+          <button className="btn" style={{ background:'#c62828', color:'#fff', padding:'3px 10px', fontSize:12 }}
+            onClick={() => deleteMut.mutate(confirmDel)} disabled={deleteMut.isPending}>
+            {deleteMut.isPending ? 'Deleting…' : 'Delete'}
+          </button>
+          <button className="btn" style={{ fontSize:12 }} onClick={() => setConfirmDel(null)}>Cancel</button>
+        </div>
+      )}
+
+      {!showAddForm && !editingId && balance > 0.001 && (
+        <button className="btn primary" onClick={() => { setPf(f => ({ ...f, amount: balance.toFixed(3) })); setShowAddForm(true) }}>
           ＋ Record Payment
         </button>
       )}
-      {!showForm && balance <= 0.001 && (payments||[]).length > 0 && (
+      {!showAddForm && !editingId && balance <= 0.001 && (payments||[]).length > 0 && (
         <div style={{ fontSize:12, color:'#2e7d32', fontWeight:600 }}>✓ Fully paid</div>
       )}
 
-      {showForm && (
-        <div style={{ background:'#f8f9fa', border:'1px solid #e0e0e0', borderRadius:4, padding:12, marginTop:8 }}>
-          <div style={{ fontWeight:700, fontSize:12, marginBottom:8 }}>Record Payment</div>
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8, marginBottom:8 }}>
-            <div className="field"><label>Date</label><input type="date" value={pf.payment_date} onChange={e=>PF('payment_date',e.target.value)}/></div>
-            <div className="field"><label>Amount BHD</label><input type="number" step="0.001" value={pf.amount} onChange={e=>PF('amount',e.target.value)}/></div>
-            <div className="field"><label>Method</label>
-              <select value={pf.method} onChange={e=>PF('method',e.target.value)}>
-                <option value="bank_transfer">Bank Transfer</option>
-                <option value="cash">Cash</option>
-                <option value="cheque">Cheque</option>
-                <option value="card">Card</option>
-                <option value="other">Other</option>
-              </select>
-            </div>
-            <div className="field"><label>Reference</label><input value={pf.reference} onChange={e=>PF('reference',e.target.value)} placeholder="Chq/Txn no."/></div>
-          </div>
-          <div className="field" style={{ marginBottom:8 }}>
-            <label>Notes</label>
-            <input value={pf.notes} onChange={e=>PF('notes',e.target.value)} placeholder="Optional notes"/>
-          </div>
-          <div style={{ display:'flex', gap:8 }}>
-            <button className="btn primary" onClick={() => addMut.mutate()} disabled={addMut.isPending || !pf.amount}>
-              {addMut.isPending ? '⏳ Saving…' : '💾 Save Payment'}
-            </button>
-            <button className="btn" onClick={() => setShowForm(false)}>Cancel</button>
-          </div>
-        </div>
+      {showAddForm && (
+        <PaymentForm
+          title="Record Payment"
+          pf={pf}
+          onChange={setPf}
+          onSave={() => addMut.mutate()}
+          onCancel={() => setShowAddForm(false)}
+          saving={addMut.isPending}
+        />
       )}
     </div>
   )
@@ -246,12 +337,17 @@ export default function InvoiceModal() {
 
   useEffect(() => {
     if (existing) {
+      // Reconstruct invoice_discount: the DB stores only total_discount (line + overall combined).
+      // Decompose by subtracting per-line discounts so the overall-discount field is pre-filled.
+      const lineDiscSum     = existing.items.reduce((s, i) => s + Number(i.discount || 0), 0)
+      const invoice_discount = Math.max(0, Number(existing.total_discount || 0) - lineDiscSum)
       setForm({
         ...existing,
-        invoice_date: existing.invoice_date?.split('T')[0] || '',
-        due_date:     existing.due_date?.split('T')[0] || existing.invoice_date?.split('T')[0] || '',
-        valid_until:  existing.valid_until?.split('T')[0] || '',
-        items: existing.items.map(i => ({ ...i, _id: i.id })),
+        invoice_date:     existing.invoice_date?.split('T')[0] || '',
+        due_date:         existing.due_date?.split('T')[0] || existing.invoice_date?.split('T')[0] || '',
+        valid_until:      existing.valid_until?.split('T')[0] || '',
+        items:            existing.items.map(i => ({ ...i, _id: i.id })),
+        invoice_discount: invoice_discount || '',
       })
     } else if (!modal.data?.id) {
       reset()
@@ -294,19 +390,20 @@ export default function InvoiceModal() {
     if (!form.items.length) { toast.error('Add at least one item'); return }
     const { subtotal, totalDisc, totalVat, grandTotal } = totals()
     const invDisc = Number(form.invoice_discount || 0)
+    // totals() already apportions invDisc into the VAT base — grand_total and total_vat are correct
     saveMut.mutate({
       ...form,
       subtotal:          subtotal.toFixed(3),
       total_discount:    (totalDisc + invDisc).toFixed(3),
       total_vat:         totalVat.toFixed(3),
       shipping:          Number(form.shipping || 0).toFixed(3),
-      grand_total:       (grandTotal - invDisc).toFixed(3),
+      grand_total:       grandTotal.toFixed(3),
     })
   }
 
   const { subtotal, totalDisc, totalVat, grandTotal } = totals()
   const invDisc  = Number(form.invoice_discount || 0)
-  const finalGrand = grandTotal - invDisc
+  const finalGrand = grandTotal   // grandTotal already includes invDisc reduction + corrected VAT
   // For new docs use modal.data.type (set by the button) so the label is correct on first render
   const effectiveType = modal.data?.id ? form.type : (modal.data?.type || form.type)
   const isQuoteType   = ['quotation','proforma'].includes(effectiveType)
@@ -367,6 +464,7 @@ export default function InvoiceModal() {
             )}
             {modal.data?.id && <>
               <button className="btn" onClick={() => window.open(invoiceApi.getPdfUrl(modal.data.id), '_blank')}>📄 PDF</button>
+              <button className="btn" onClick={() => window.open(invoiceApi.getPrintUrl(modal.data.id), '_blank')}>🖨 Print</button>
               <button className="btn" onClick={() => openModal('payment', { invoiceId: modal.data.id })}>💳 Payment</button>
               {/* Write-off controls — admin only, tax invoices only */}
               {isAdmin && existing?.type === 'tax_invoice' && !existing?.write_off_date &&
@@ -531,7 +629,9 @@ export default function InvoiceModal() {
                 </table>
 
                 <div style={{ display:'flex', gap:8, marginTop:4, flexWrap:'wrap', alignItems:'center' }}>
-                  <button className="add-item-btn" onClick={() => setShowProdPicker(true)}>＋ Add Item</button>
+                  <button className="add-item-btn" onClick={() => setShowProdPicker(true)}>＋ Pick from Catalog</button>
+                  <button className="add-item-btn" style={{ background:'#fff8e1', borderColor:'#ffe082', color:'#5d4037' }}
+                    onClick={() => addItem()}>✎ Free Text Line</button>
                   <div style={{ display:'flex', alignItems:'center', gap:6, marginLeft:8, fontSize:12 }}>
                     <label style={{ color:'var(--green)', fontWeight:600, whiteSpace:'nowrap' }}>🏷 {isQuoteType ? 'Overall Discount' : 'Invoice Discount'} (BHD):</label>
                     <input type="number" min="0" step="0.001"
@@ -580,6 +680,11 @@ export default function InvoiceModal() {
                 <tr><td style={{ color:'#555' }}>Subtotal:</td><td style={{ textAlign:'right', width:130 }}>BHD {subtotal.toFixed(3)}</td></tr>
                 {totalDisc > 0 && <tr><td style={{ color:'var(--green)' }}>Line Discounts:</td><td style={{ textAlign:'right', color:'var(--green)' }}>— {totalDisc.toFixed(3)}</td></tr>}
                 {invDisc > 0 && <tr><td style={{ color:'var(--green)' }}>{isQuoteType ? 'Overall Discount:' : 'Invoice Discount:'}</td><td style={{ textAlign:'right', color:'var(--green)' }}>— {invDisc.toFixed(3)}</td></tr>}
+                {(totalDisc > 0 || invDisc > 0) && (
+                  <tr><td style={{ color:'#555', fontSize:11 }}>Net Taxable:</td>
+                    <td style={{ textAlign:'right', fontSize:11 }}>BHD {(subtotal - totalDisc - invDisc).toFixed(3)}</td>
+                  </tr>
+                )}
                 <tr><td style={{ color:'var(--red)' }}>VAT (10%):</td><td style={{ textAlign:'right', color:'var(--red)' }}>BHD {totalVat.toFixed(3)}</td></tr>
                 {Number(form.shipping||0) > 0 && <tr><td style={{ color:'#555' }}>Shipping:</td><td style={{ textAlign:'right' }}>BHD {Number(form.shipping||0).toFixed(3)}</td></tr>}
                 <tr className="grand">

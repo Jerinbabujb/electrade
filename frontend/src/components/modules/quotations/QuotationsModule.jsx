@@ -238,6 +238,7 @@ export default function QuotationsModule() {
         </button>
         <div className="toolbar-sep" />
         <button className="btn" disabled={!selectedId} onClick={() => window.open(invoiceApi.getPdfUrl(selectedId), '_blank')}>📄 PDF</button>
+        <button className="btn" disabled={!selectedId} onClick={() => window.open(invoiceApi.getPrintUrl(selectedId), '_blank')}>🖨 Print</button>
         <button className="btn" disabled={!selectedId} onClick={() => setShowEmail(true)}>✉️ Email</button>
         <button className="btn" onClick={handleExportCsv} title="Export current filter to CSV">⬇ Export CSV</button>
         <div className="toolbar-sep" />
@@ -304,9 +305,15 @@ export default function QuotationsModule() {
                 <td className="right">{fmtBhd(q.total_vat)}</td>
                 <td className="right" style={{ fontWeight:600 }}>{fmtBhd(q.grand_total)}</td>
                 <td>
-                  {q.payment_status === 'draft'
-                    ? <span style={{ fontSize:11, padding:'1px 8px', background:'#fff3e0', color:'#e65100', border:'1px solid #ffcc80', borderRadius:10, fontWeight:700 }}>DRAFT</span>
-                    : <span className={`badge badge-${q.payment_status}`}>{q.payment_status}</span>
+                  {q.converted_at
+                    ? <span style={{ fontSize:11, padding:'1px 8px', background:'#e8f5e9', color:'#2e7d32', border:'1px solid #a5d6a7', borderRadius:10, fontWeight:700 }}>Converted</span>
+                    : q.payment_status === 'void'
+                    ? <span style={{ fontSize:11, padding:'1px 8px', background:'#f5f5f5', color:'#888', border:'1px solid #e0e0e0', borderRadius:10, fontWeight:700 }}>Void</span>
+                    : q.valid_until && new Date(q.valid_until) < new Date()
+                    ? <span style={{ fontSize:11, padding:'1px 8px', background:'#fdecea', color:'#c62828', border:'1px solid #ef9a9a', borderRadius:10, fontWeight:700 }}>Expired</span>
+                    : q.payment_status === 'draft'
+                    ? <span style={{ fontSize:11, padding:'1px 8px', background:'#fff3e0', color:'#e65100', border:'1px solid #ffcc80', borderRadius:10, fontWeight:700 }}>Draft</span>
+                    : <span style={{ fontSize:11, padding:'1px 8px', background:'#e3f2fd', color:'#1565c0', border:'1px solid #90caf9', borderRadius:10, fontWeight:700 }}>Open</span>
                   }
                 </td>
               </tr>

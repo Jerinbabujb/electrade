@@ -60,21 +60,35 @@ exports.getOne = async (req, res, next) => {
 exports.create = async (req, res, next) => {
   try {
     const { customer_id, dn_date, delivery_address, project_ref,
-            po_reference, delivered_by, items = [], notes } = req.body;
+            po_reference, delivered_by, items = [], notes,
+            force_overstock = false } = req.body;
     if (!items.length) return res.status(400).json({ error: { message: 'Add at least one item' } });
 
-    // Check stock availability before committing
+    // Check stock availability — collect ALL shortfalls, then either warn or proceed
+    const shortfalls = [];
     for (const item of items) {
       if (item.product_id) {
         const { rows: [p] } = await db.query(
-          `SELECT stock_qty, name FROM products WHERE id = $1 AND company_id = $2`,
+          `SELECT stock_qty, name, is_stock_tracked FROM products WHERE id = $1 AND company_id = $2`,
           [item.product_id, req.user.company_id]);
-        if (p && parseFloat(p.stock_qty) < parseFloat(item.qty_delivered)) {
-          return res.status(400).json({
-            error: { message: `Insufficient stock for "${p.name}". Available: ${p.stock_qty}, Requested: ${item.qty_delivered}` }
+        if (p && p.is_stock_tracked && parseFloat(p.stock_qty) < parseFloat(item.qty_delivered)) {
+          shortfalls.push({
+            name:       p.name,
+            available:  parseFloat(p.stock_qty),
+            requested:  parseFloat(item.qty_delivered),
+            shortfall:  parseFloat(item.qty_delivered) - parseFloat(p.stock_qty),
           });
         }
       }
+    }
+
+    // If shortfalls exist and caller has not explicitly confirmed overstock, return warnings
+    if (shortfalls.length > 0 && !force_overstock) {
+      return res.status(409).json({
+        code:      'STOCK_SHORTFALL',
+        shortfalls,
+        message:   'Some items exceed available stock. Confirm to proceed (stock will go negative until replenished).',
+      });
     }
 
     const result = await db.withTransaction(async (client) => {
@@ -106,7 +120,8 @@ exports.create = async (req, res, next) => {
       return dn;
     });
 
-    res.status(201).json({ data: result, message: `${result.dn_no} created — stock deducted` });
+    const backorderNote = shortfalls.length > 0 ? ' (⚠ backorder — replenish stock via Purchases)' : '';
+    res.status(201).json({ data: result, message: `${result.dn_no} created — stock deducted${backorderNote}` });
   } catch (err) { next(err); }
 };
 
@@ -241,10 +256,27 @@ exports.getPdf = async (req, res, next) => {
     // Attach company data for PDF rendering
     const { rows: [co] } = await db.query(
       `SELECT name, name_ar, address, tel, email, vat_number, cr_number,
-              bank_name, bank_iban, bank_swift, logo, theme_color
+              bank_name, bank_iban, bank_swift, logo, theme_color, pdf_settings
        FROM companies WHERE id = $1`, [req.user.company_id]);
     const pdfBuffer = await pdfSvc.generateDnPdf({ ...dnData, company: co });
-    res.set({ 'Content-Type': 'text/html; charset=utf-8' });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${dnData.dn_no}.pdf"`);
     res.send(pdfBuffer);
+  } catch (err) { next(err); }
+};
+
+exports.getPrint = async (req, res, next) => {
+  try {
+    let dnData
+    const mockRes = { json: (d) => { dnData = d.data } }
+    await exports.getOne({ ...req }, mockRes, next);
+    const { rows: [co] } = await db.query(
+      `SELECT name, name_ar, address, tel, email, vat_number, cr_number,
+              bank_name, bank_iban, bank_swift, logo, theme_color, pdf_settings
+       FROM companies WHERE id = $1`, [req.user.company_id]);
+    const html = pdfSvc.dnPrintHtml({ ...dnData, company: co });
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('Content-Security-Policy', "script-src 'unsafe-inline'; script-src-attr 'unsafe-inline'");
+    res.send(html);
   } catch (err) { next(err); }
 };

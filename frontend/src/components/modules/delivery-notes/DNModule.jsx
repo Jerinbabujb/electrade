@@ -289,7 +289,11 @@ export default function DNModule() {
           </button>
           <button className="btn"
             disabled={!selectedId} onClick={() => window.open(dnApi.getPdfUrl(selectedId), '_blank')}>
-            📄 Print DN
+            📄 PDF DN
+          </button>
+          <button className="btn"
+            disabled={!selectedId} onClick={() => window.open(dnApi.getPrintUrl(selectedId), '_blank')}>
+            🖨 Print DN
           </button>
           <button className="btn warn"
             disabled={!selectedId}
@@ -413,6 +417,10 @@ export default function DNModule() {
           <button className="btn" disabled={!hSelectedId}
             onClick={() => window.open(invoiceApi.getPdfUrl(hSelectedId), '_blank')}>
             📄 PDF
+          </button>
+          <button className="btn" disabled={!hSelectedId}
+            onClick={() => window.open(invoiceApi.getPrintUrl(hSelectedId), '_blank')}>
+            🖨 Print
           </button>
           <button className="btn" disabled={!hSelectedId}
             onClick={() => openModal('invoice', { id: hSelectedId })}>

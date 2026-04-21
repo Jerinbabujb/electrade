@@ -191,6 +191,166 @@ module.exports.productsRouter = (() => {
     } catch (err) { next(err) }
   })
 
+  // ── Cycle count sessions — all must be BEFORE /:id ───────────
+  r.get('/count-sessions', async (req, res, next) => {
+    try {
+      const { rows } = await db.query(`
+        SELECT s.*,
+               cat.name AS category_name,
+               u.name   AS created_by_name,
+               COUNT(i.id)::int               AS item_count,
+               COUNT(i.physical_qty)::int      AS counted_items,
+               COUNT(CASE WHEN ABS(COALESCE(i.physical_qty,0) - i.system_qty) >= 0.001 AND i.physical_qty IS NOT NULL THEN 1 END)::int AS variance_count
+        FROM stock_count_sessions s
+        LEFT JOIN categories cat ON cat.id = s.category_id
+        LEFT JOIN users u ON u.id = s.created_by
+        LEFT JOIN stock_count_session_items i ON i.session_id = s.id
+        WHERE s.company_id = $1
+        GROUP BY s.id, cat.name, u.name
+        ORDER BY s.created_at DESC
+      `, [req.user.company_id])
+      res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/count-sessions', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { name, category_id, notes } = req.body
+      if (!name || !name.trim()) return res.status(400).json({ error: { message: 'Session name required' } })
+
+      const { rows: [session] } = await db.query(`
+        INSERT INTO stock_count_sessions (company_id, name, category_id, notes, created_by)
+        VALUES ($1,$2,$3,$4,$5) RETURNING *
+      `, [req.user.company_id, name.trim(), category_id || null, notes || null, req.user.id])
+
+      let productWhere = 'p.company_id = $1 AND p.is_active = true AND p.is_stock_tracked = true'
+      const params = [req.user.company_id]
+      if (category_id) { params.push(category_id); productWhere += ` AND p.category_id = $${params.length}` }
+
+      const { rows: products } = await db.query(
+        `SELECT id, stock_qty FROM products p WHERE ${productWhere}`, params)
+
+      for (const p of products) {
+        await db.query(`
+          INSERT INTO stock_count_session_items (session_id, product_id, system_qty)
+          VALUES ($1,$2,$3) ON CONFLICT (session_id, product_id) DO NOTHING
+        `, [session.id, p.id, parseFloat(p.stock_qty) || 0])
+      }
+
+      res.status(201).json({ data: session })
+    } catch (err) { next(err) }
+  })
+
+  r.get('/count-sessions/:sid', async (req, res, next) => {
+    try {
+      const { rows: [session] } = await db.query(`
+        SELECT s.*, cat.name AS category_name, u.name AS created_by_name
+        FROM stock_count_sessions s
+        LEFT JOIN categories cat ON cat.id = s.category_id
+        LEFT JOIN users u ON u.id = s.created_by
+        WHERE s.id = $1 AND s.company_id = $2
+      `, [req.params.sid, req.user.company_id])
+      if (!session) return res.status(404).json({ error: { message: 'Session not found' } })
+
+      const { rows: items } = await db.query(`
+        SELECT i.*, p.sku, p.name AS product_name, p.unit, p.stock_min,
+               p.stock_qty AS current_system_qty,
+               cat.name AS category_name
+        FROM stock_count_session_items i
+        JOIN products p ON p.id = i.product_id
+        LEFT JOIN categories cat ON cat.id = p.category_id
+        WHERE i.session_id = $1
+        ORDER BY cat.name NULLS LAST, p.name
+      `, [req.params.sid])
+
+      res.json({ data: { ...session, items } })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/count-sessions/:sid', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { name, notes, items } = req.body
+      const { rows: [session] } = await db.query(
+        `SELECT * FROM stock_count_sessions WHERE id=$1 AND company_id=$2`,
+        [req.params.sid, req.user.company_id])
+      if (!session) return res.status(404).json({ error: { message: 'Session not found' } })
+      if (session.status === 'complete') return res.status(400).json({ error: { message: 'Cannot edit a completed session' } })
+
+      if (name !== undefined || notes !== undefined) {
+        await db.query(
+          `UPDATE stock_count_sessions SET name=COALESCE($1,name), notes=COALESCE($2,notes) WHERE id=$3`,
+          [name || null, notes !== undefined ? notes : null, req.params.sid])
+      }
+
+      if (Array.isArray(items)) {
+        for (const it of items) {
+          const pq = it.physical_qty !== '' && it.physical_qty !== null && it.physical_qty !== undefined
+            ? parseFloat(it.physical_qty) : null
+          await db.query(`
+            UPDATE stock_count_session_items
+            SET physical_qty = $1, counted_at = CASE WHEN $1 IS NOT NULL THEN now() ELSE counted_at END
+            WHERE session_id = $2 AND product_id = $3
+          `, [pq, req.params.sid, it.product_id])
+        }
+      }
+
+      res.json({ message: 'Draft saved' })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/count-sessions/:sid/apply', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { rows: [session] } = await db.query(
+        `SELECT * FROM stock_count_sessions WHERE id=$1 AND company_id=$2`,
+        [req.params.sid, req.user.company_id])
+      if (!session) return res.status(404).json({ error: { message: 'Session not found' } })
+      if (session.status === 'complete') return res.status(400).json({ error: { message: 'Session already applied' } })
+
+      const { rows: items } = await db.query(`
+        SELECT i.product_id, i.physical_qty, p.stock_qty
+        FROM stock_count_session_items i
+        JOIN products p ON p.id = i.product_id
+        WHERE i.session_id = $1 AND i.physical_qty IS NOT NULL
+      `, [req.params.sid])
+
+      let applied = 0, skipped = 0
+      const countNotes = `Cycle count: ${session.name}`
+
+      await db.withTransaction(async (client) => {
+        for (const it of items) {
+          const pq       = parseFloat(it.physical_qty)
+          const sysQty   = parseFloat(it.stock_qty)
+          const variance = pq - sysQty
+          if (Math.abs(variance) < 0.001) { skipped++; continue }
+
+          await client.query(`
+            INSERT INTO stock_movements (id,company_id,product_id,movement_type,qty,ref_type,notes,created_by)
+            VALUES ($1,$2,$3,'adjustment',$4,'cycle_count',$5,$6)
+          `, [uuid(), req.user.company_id, it.product_id, variance, countNotes, req.user.id])
+          applied++
+        }
+
+        await client.query(
+          `UPDATE stock_count_sessions SET status='complete', completed_at=now() WHERE id=$1`,
+          [req.params.sid])
+      })
+
+      res.json({ message: `Cycle count applied: ${applied} adjusted, ${skipped} unchanged.`, applied, skipped })
+    } catch (err) { next(err) }
+  })
+
+  r.delete('/count-sessions/:sid', authorize('admin','storekeeper'), async (req, res, next) => {
+    try {
+      const { rows: [session] } = await db.query(
+        `SELECT status FROM stock_count_sessions WHERE id=$1 AND company_id=$2`,
+        [req.params.sid, req.user.company_id])
+      if (!session) return res.status(404).json({ error: { message: 'Session not found' } })
+      if (session.status === 'complete') return res.status(400).json({ error: { message: 'Cannot delete a completed session' } })
+      await db.query(`DELETE FROM stock_count_sessions WHERE id=$1`, [req.params.sid])
+      res.json({ message: 'Session deleted' })
+    } catch (err) { next(err) }
+  })
+
   // Barcode / SKU exact lookup — must be BEFORE /:id
   r.get('/lookup', async (req, res, next) => {
     try {
@@ -234,16 +394,19 @@ module.exports.productsRouter = (() => {
   r.post('/', authorize('admin','sales','storekeeper'), async (req, res, next) => {
     try {
       const f = req.body
+      // non_stock and service products never track stock
+      const productType    = ['stock','non_stock','service'].includes(f.product_type) ? f.product_type : 'stock'
+      const isStockTracked = productType === 'stock' ? (f.is_stock_tracked !== false) : false
       const { rows: [p] } = await db.query(
         `INSERT INTO products (id,company_id,sku,barcode,name,description,category_id,brand,country_of_origin,
            unit,box_qty,voltage_rating,ampere_rating,wattage,cost_price,price_1,price_2,price_3,price_4,
-           vat_rate,stock_min,is_stock_tracked,is_sales_item,is_purchase_item)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
+           vat_rate,stock_min,is_stock_tracked,is_sales_item,is_purchase_item,product_type)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING *`,
         [uuid(),req.user.company_id,f.sku,f.barcode||null,f.name,f.description||null,f.category_id||null,
          f.brand||null,f.country_of_origin||null,f.unit||'pcs',f.box_qty||1,
          f.voltage_rating||null,f.ampere_rating||null,f.wattage||null,
          f.cost_price||0,f.price_1||0,f.price_2||0,f.price_3||0,f.price_4||0,
-         f.vat_rate||10,f.stock_min||0,f.is_stock_tracked!==false,f.is_sales_item!==false,f.is_purchase_item!==false])
+         f.vat_rate||10,f.stock_min||0,isStockTracked,f.is_sales_item!==false,f.is_purchase_item!==false,productType])
       res.status(201).json({ data: p })
     } catch (err) { next(err) }
   })
@@ -251,17 +414,19 @@ module.exports.productsRouter = (() => {
   r.put('/:id', authorize('admin','sales','storekeeper'), async (req, res, next) => {
     try {
       const f = req.body
+      const productType    = ['stock','non_stock','service'].includes(f.product_type) ? f.product_type : 'stock'
+      const isStockTracked = productType === 'stock' ? (f.is_stock_tracked !== false) : false
       const { rows: [p] } = await db.query(
         `UPDATE products SET sku=$1,barcode=$2,name=$3,description=$4,category_id=$5,brand=$6,
            country_of_origin=$7,unit=$8,box_qty=$9,voltage_rating=$10,ampere_rating=$11,wattage=$12,
            cost_price=$13,price_1=$14,price_2=$15,price_3=$16,price_4=$17,vat_rate=$18,
-           stock_min=$19,updated_at=now()
-         WHERE id=$20 AND company_id=$21 RETURNING *`,
+           stock_min=$19,is_stock_tracked=$20,product_type=$21,updated_at=now()
+         WHERE id=$22 AND company_id=$23 RETURNING *`,
         [f.sku,f.barcode||null,f.name,f.description||null,f.category_id||null,f.brand||null,
          f.country_of_origin||null,f.unit||'pcs',f.box_qty||1,
          f.voltage_rating||null,f.ampere_rating||null,f.wattage||null,
          f.cost_price||0,f.price_1||0,f.price_2||0,f.price_3||0,f.price_4||0,
-         f.vat_rate||10,f.stock_min||0,req.params.id,req.user.company_id])
+         f.vat_rate||10,f.stock_min||0,isStockTracked,productType,req.params.id,req.user.company_id])
       res.json({ data: p })
     } catch (err) { next(err) }
   })
@@ -676,6 +841,8 @@ module.exports.companiesRouter = (() => {
   r.put('/', async (req, res, next) => {
     try {
       const f = req.body
+      const hiddenModules = Array.isArray(f.hidden_modules) ? f.hidden_modules : []
+      const pdfSettings   = (f.pdf_settings && typeof f.pdf_settings === 'object') ? f.pdf_settings : {}
       const { rows: [co] } = await db.query(
         `UPDATE companies SET name=$1,name_ar=$2,address=$3,tel=$4,email=$5,
            vat_number=$6,cr_number=$7,
@@ -683,13 +850,16 @@ module.exports.companiesRouter = (() => {
            theme_color=$13,
            invoice_prefix=COALESCE(NULLIF($14,''),'INV'),
            dn_prefix=COALESCE(NULLIF($15,''),'DN'),
-           po_prefix=COALESCE(NULLIF($16,''),'PUR')
-         WHERE id=$17 RETURNING *`,
+           po_prefix=COALESCE(NULLIF($16,''),'PUR'),
+           hidden_modules=$17,
+           pdf_settings=$18
+         WHERE id=$19 RETURNING *`,
         [f.name,f.name_ar||null,f.address||null,f.tel||null,f.email||null,
          f.vat_number||null,f.cr_number||null,
          f.default_vat_rate||10,f.bank_name||null,f.bank_acct_name||null,f.bank_iban||null,f.bank_swift||null,
          f.theme_color||'#1a5fa8',
          f.invoice_prefix||'INV', f.dn_prefix||'DN', f.po_prefix||'PUR',
+         hiddenModules, pdfSettings,
          req.user.company_id])
       res.json({ data: co })
     } catch (err) { next(err) }

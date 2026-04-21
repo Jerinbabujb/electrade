@@ -50,6 +50,40 @@ router.post('/', authorize('admin','sales'), async (req, res, next) => {
 
     // ── Convert invoice/quotation/proforma → delivery_note ─
     if (to_type === 'delivery_note') {
+      // Stock shortfall check (same logic as direct DN create)
+      const finalItemsForCheck = (overrides.items && overrides.items.length > 0)
+        ? overrides.items
+        : srcItems.map(it => ({
+            product_id:    it.product_id,
+            qty_delivered: it.qty != null ? it.qty : it.qty_ordered,
+          }));
+
+      if (!overrides.force_overstock) {
+        const shortfalls = [];
+        for (const it of finalItemsForCheck) {
+          if (it.product_id) {
+            const { rows: [p] } = await db.query(
+              `SELECT stock_qty, name, is_stock_tracked FROM products WHERE id = $1 AND company_id = $2`,
+              [it.product_id, co_id]);
+            if (p && p.is_stock_tracked && parseFloat(p.stock_qty) < parseFloat(it.qty_delivered)) {
+              shortfalls.push({
+                name:      p.name,
+                available: parseFloat(p.stock_qty),
+                requested: parseFloat(it.qty_delivered),
+                shortfall: parseFloat(it.qty_delivered) - parseFloat(p.stock_qty),
+              });
+            }
+          }
+        }
+        if (shortfalls.length > 0) {
+          return res.status(409).json({
+            code: 'STOCK_SHORTFALL',
+            shortfalls,
+            message: 'Some items exceed available stock. Confirm to proceed (stock will go negative until replenished).',
+          });
+        }
+      }
+
       const { rows: [co] } = await db.query(
         `UPDATE companies SET next_dn_seq = next_dn_seq + 1
          WHERE id = $1 RETURNING dn_prefix, next_dn_seq - 1 AS seq`, [co_id]);
@@ -140,9 +174,24 @@ router.post('/', authorize('admin','sales'), async (req, res, next) => {
         vat_rate:    it.vat_rate || 10,
       }));
 
-      const subtotal    = items.reduce((s, i) => s + Math.abs(i.qty) * i.unit_price, 0) * multiplier;
-      const total_vat   = items.reduce((s, i) => s + Math.abs(i.qty) * i.unit_price * i.vat_rate / 100, 0) * multiplier;
-      const grand_total = subtotal + total_vat;
+      // Derive invoice-level (overall) discount from source header total_discount
+      // minus the sum of per-line discounts that are already on the items.
+      const lineDiscSum  = items.reduce((s, i) => s + Number(i.discount || 0), 0);
+      const invDisc      = Math.max(0, Number(src.total_discount || 0) - lineDiscSum);
+
+      // VAT-compliant totals: apportion overall discount proportionally (NBR Article 27)
+      const netAfterLineDisc = items.reduce((s, i) =>
+        s + Math.abs(Number(i.qty)) * Number(i.unit_price) - Number(i.discount || 0), 0);
+      let total_vat = 0;
+      for (const it of items) {
+        const lineNet     = Math.abs(Number(it.qty)) * Number(it.unit_price) - Number(it.discount || 0);
+        const discShare   = netAfterLineDisc > 0 ? invDisc * (lineNet / netAfterLineDisc) : 0;
+        total_vat += (lineNet - discShare) * Number(it.vat_rate || 10) / 100;
+      }
+      total_vat          *= multiplier;
+      const subtotal      = netAfterLineDisc * multiplier;
+      const total_discount = (lineDiscSum + invDisc) * multiplier;
+      const grand_total   = (netAfterLineDisc - invDisc) * multiplier + total_vat;
 
       result = await db.withTransaction(async (client) => {
         // When converting a proforma/quotation → tax_invoice, carry the source doc no. as PO reference
@@ -155,13 +204,14 @@ router.post('/', authorize('admin','sales'), async (req, res, next) => {
           `INSERT INTO invoices
              (id, company_id, invoice_no, type, customer_id, invoice_date, due_date,
               po_reference, subtotal, total_discount, total_vat, grand_total, notes, created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,$12,$13) RETURNING *`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
           [uuid(), co_id, invoice_no, to_type,
            overrides.customer_id || src.customer_id,
            overrides.invoice_date || new Date(),
            overrides.due_date || null,
            derivedPoRef,
-           subtotal.toFixed(3), total_vat.toFixed(3), grand_total.toFixed(3),
+           subtotal.toFixed(3), total_discount.toFixed(3),
+           total_vat.toFixed(3), grand_total.toFixed(3),
            overrides.notes || src.notes, req.user.id]);
 
         for (let i = 0; i < items.length; i++) {
