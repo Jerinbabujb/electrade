@@ -2,6 +2,106 @@ const router = require('express').Router();
 const db     = require('../db');
 const { v4: uuid } = require('uuid');
 const { authenticate, authorize } = require('../middleware/auth');
+const multer = require('multer');
+const XLSX   = require('xlsx');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// ── Excel import helpers ──────────────────────────────────────
+
+// Normalise a header string to a consistent key
+function normHeader(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// Map any header variant to a canonical field name
+const HEADER_MAP = {
+  // cheque_no
+  chequeno: 'cheque_no', chequenumber: 'cheque_no', chqno: 'cheque_no',
+  checkno: 'cheque_no', checknumber: 'cheque_no', chkno: 'cheque_no',
+  chequeno: 'cheque_no', no: 'cheque_no', number: 'cheque_no', chqnumber: 'cheque_no',
+  // bank_name
+  bank: 'bank_name', bankname: 'bank_name', drawnon: 'bank_name', bankdrawnon: 'bank_name',
+  // direction
+  direction: 'direction', type: 'direction', chequetype: 'direction', chqtype: 'direction',
+  // party_name
+  party: 'party_name', partyname: 'party_name', name: 'party_name',
+  suppliercustomer: 'party_name', payee: 'party_name', drawer: 'party_name',
+  customer: 'party_name', supplier: 'party_name', favourof: 'party_name',
+  infavourof: 'party_name', issuedto: 'party_name', receivedfrom: 'party_name',
+  // amount
+  amount: 'amount', amt: 'amount', value: 'amount', chqamount: 'amount',
+  chequeamount: 'amount', amountbhd: 'amount', bhd: 'amount',
+  // cheque_date
+  chequedate: 'cheque_date', chqdate: 'cheque_date', duedate: 'cheque_date',
+  postdate: 'cheque_date', postdateddate: 'cheque_date', valuedate: 'cheque_date',
+  maturitydate: 'cheque_date', date: 'cheque_date', checkdate: 'cheque_date',
+  // issue_date
+  issuedate: 'issue_date', issueddate: 'issue_date', entrydate: 'issue_date',
+  receiptdate: 'issue_date', recordeddate: 'issue_date',
+  // status
+  status: 'status', chequestatus: 'status', clearingstatus: 'status', state: 'status',
+  // notes
+  notes: 'notes', note: 'notes', remarks: 'notes', remark: 'notes',
+  reference: 'notes', ref: 'notes', description: 'notes', narration: 'notes',
+  particulars: 'notes',
+}
+
+function mapHeaders(rawHeaders) {
+  // Returns { fieldName: colIndex } for each recognised header
+  const map = {}
+  rawHeaders.forEach((h, i) => {
+    const key = normHeader(h)
+    const field = HEADER_MAP[key]
+    if (field && !(field in map)) map[field] = i  // first match wins
+  })
+  return map
+}
+
+// Parse an Excel date serial or string → 'YYYY-MM-DD'
+function parseExcelDate(val) {
+  if (!val) return null
+  if (typeof val === 'number') {
+    // Excel serial date
+    const d = XLSX.SSF.parse_date_code(val)
+    if (!d) return null
+    return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`
+  }
+  const s = String(val).trim()
+  // DD/MM/YYYY
+  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/)
+  if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+  // MM/DD/YYYY
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  if (m) return `${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`
+  // Try JS Date as fallback
+  const d = new Date(s)
+  if (!isNaN(d)) return d.toISOString().split('T')[0]
+  return null
+}
+
+function parseDirection(val) {
+  const s = String(val || '').toLowerCase().trim()
+  if (/^(issued?|out(going)?|payment|paid|given|i)$/.test(s)) return 'issued'
+  if (/^(received?|in(coming)?|receipt|recv?d?|r)$/.test(s))  return 'received'
+  return null
+}
+
+function parseStatus(val) {
+  const s = String(val || '').toLowerCase().trim()
+  if (/^(clear(ed)?|c|presented|honoured?|paid|encashed)$/.test(s)) return 'cleared'
+  if (/^(bounc(ed)?|b|dishonoured?|returned?|unpaid)$/.test(s))     return 'bounced'
+  if (/^(cancel(led)?|void(ed)?|v|x)$/.test(s))                     return 'cancelled'
+  return 'pending'  // default
+}
+
+function parseAmount(val) {
+  if (val == null || val === '') return null
+  const n = parseFloat(String(val).replace(/,/g, ''))
+  return isNaN(n) || n <= 0 ? null : n
+}
 
 router.use(authenticate);
 
@@ -158,5 +258,170 @@ router.delete('/:id', authorize('admin'), async (req, res, next) => {
     res.json({ message: 'Deleted' });
   } catch (err) { next(err); }
 });
+
+// ── Download import template ──────────────────────────────────
+router.get('/import-template', authenticate, (req, res) => {
+  const wb = XLSX.utils.book_new()
+  const headers = ['Cheque No', 'Bank Name', 'Direction', 'Party Name', 'Amount',
+                   'Issue Date', 'Cheque Date', 'Status', 'Notes']
+  const sample = [
+    ['000101', 'BBK',         'Issued',   'Al Noor Supplies',     1250.500, '15/01/2026', '30/01/2026', 'Pending',  'PUR-2026-0012'],
+    ['000102', 'Ahli United', 'Issued',   'Gulf Electric',         850.000, '15/01/2026', '15/02/2026', 'Cleared',  ''],
+    ['CQ-001', 'NBB',         'Received', 'Al Manama Trading',    3400.000, '10/01/2026', '10/03/2026', 'Pending',  'INV-2026-0045'],
+    ['CQ-002', 'BisB',        'Received', 'Star Contractors',      975.250, '08/01/2026', '08/02/2026', 'Bounced',  'Re-presented'],
+  ]
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...sample])
+  ws['!cols'] = [14, 16, 12, 24, 12, 14, 14, 12, 28].map(w => ({ wch: w }))
+  XLSX.utils.book_append_sheet(wb, ws, 'Cheques')
+
+  // Guidance sheet
+  const guide = XLSX.utils.aoa_to_sheet([
+    ['Column', 'Required?', 'Accepted values / format'],
+    ['Cheque No',   'Yes', 'Any text — must be unique per direction'],
+    ['Bank Name',   'No',  'Free text — e.g. BBK, Ahli United, NBB'],
+    ['Direction',   'Yes', 'Issued  OR  Received  (case-insensitive)'],
+    ['Party Name',  'No',  'Supplier or customer name'],
+    ['Amount',      'Yes', 'Numeric — do not include currency symbol'],
+    ['Issue Date',  'No',  'DD/MM/YYYY  or  YYYY-MM-DD'],
+    ['Cheque Date', 'Yes', 'DD/MM/YYYY  or  YYYY-MM-DD  (post-date / value date)'],
+    ['Status',      'No',  'Pending (default)  |  Cleared  |  Bounced  |  Cancelled'],
+    ['Notes',       'No',  'Reference, invoice no., remarks, etc.'],
+  ])
+  guide['!cols'] = [16, 12, 42].map(w => ({ wch: w }))
+  XLSX.utils.book_append_sheet(wb, guide, 'Guide')
+
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
+  res.setHeader('Content-Disposition', 'attachment; filename="cheque_import_template.xlsx"')
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+  res.send(buf)
+})
+
+// ── Preview & Import from Excel ───────────────────────────────
+router.post('/import', authenticate, authorize('admin', 'accountant'),
+  upload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } })
+
+    const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: false })
+    const ws = wb.Sheets[wb.SheetNames[0]]
+    const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' })
+
+    if (raw.length < 2) return res.status(400).json({ error: { message: 'File is empty or has no data rows' } })
+
+    const headerRow = raw[0]
+    const colMap = mapHeaders(headerRow)
+
+    // Require at least cheque_no + amount + cheque_date
+    const missing = ['cheque_no', 'amount', 'cheque_date'].filter(f => !(f in colMap))
+    if (missing.length) {
+      return res.status(400).json({ error: {
+        message: `Could not find required column(s): ${missing.join(', ')}. ` +
+                 `Headers found: ${headerRow.filter(Boolean).join(', ')}`
+      }})
+    }
+
+    const companyId = req.user.company_id
+    const preview   = req.query.preview === '1'
+
+    // Build a name→id lookup for existing customers (case-insensitive)
+    const custRes = await db.query(
+      `SELECT id, LOWER(name) AS lname FROM customers WHERE company_id=$1`, [companyId])
+    const custByName = {}
+    for (const r of custRes.rows) custByName[r.lname] = r.id
+
+    // Load existing cheque_no+direction pairs to detect duplicates
+    const existRes = await db.query(
+      `SELECT LOWER(cheque_no) AS chq, direction FROM cheques WHERE company_id=$1`, [companyId])
+    const existSet = new Set(existRes.rows.map(r => `${r.chq}||${r.direction}`))
+
+    const today = new Date().toISOString().split('T')[0]
+    const get   = (row, field) => colMap[field] !== undefined ? row[colMap[field]] : ''
+
+    const rows = []
+    for (let i = 1; i < raw.length; i++) {
+      const row = raw[i]
+      // Skip completely blank rows
+      if (row.every(c => c === '' || c == null)) continue
+
+      const cheque_no  = String(get(row, 'cheque_no') || '').trim()
+      const amount     = parseAmount(get(row, 'amount'))
+      const chequeDate = parseExcelDate(get(row, 'cheque_date'))
+      const issueDate  = parseExcelDate(get(row, 'issue_date')) || today
+      const bankName   = String(get(row, 'bank_name') || '').trim() || null
+      const partyRaw   = String(get(row, 'party_name') || '').trim()
+      const dirRaw     = get(row, 'direction')
+      const statusRaw  = get(row, 'status')
+      const notes      = String(get(row, 'notes') || '').trim() || null
+
+      const errors = []
+      if (!cheque_no)  errors.push('missing cheque no')
+      if (!amount)     errors.push('invalid amount')
+      if (!chequeDate) errors.push('invalid cheque date')
+
+      const direction = parseDirection(dirRaw)
+      if (!direction) errors.push(`unrecognised direction "${dirRaw}" — use Issued or Received`)
+
+      const status  = parseStatus(statusRaw)
+      const partyId = partyRaw ? (custByName[partyRaw.toLowerCase()] || null) : null
+
+      const isDuplicate = cheque_no && direction
+        ? existSet.has(`${cheque_no.toLowerCase()}||${direction}`)
+        : false
+
+      rows.push({
+        row: i + 1,
+        cheque_no,
+        bank_name:   bankName,
+        direction,
+        party_name:  partyRaw || null,
+        party_id:    partyId,
+        amount,
+        cheque_date: chequeDate,
+        issue_date:  issueDate,
+        status,
+        notes,
+        errors,
+        is_duplicate: isDuplicate,
+        party_matched: !!partyId,
+      })
+    }
+
+    const valid  = rows.filter(r => r.errors.length === 0 && !r.is_duplicate)
+    const errors = rows.filter(r => r.errors.length > 0)
+    const dupes  = rows.filter(r => r.is_duplicate)
+
+    if (preview) {
+      return res.json({ data: { rows, valid: valid.length, errors: errors.length, duplicates: dupes.length } })
+    }
+
+    // Commit valid rows
+    if (!valid.length) {
+      return res.status(400).json({ error: { message: 'No valid rows to import' } })
+    }
+
+    const client = await db.pool.connect()
+    try {
+      await client.query('BEGIN')
+      for (const r of valid) {
+        await client.query(
+          `INSERT INTO cheques (id, company_id, cheque_no, bank_name, direction,
+             party_id, party_name, amount, cheque_date, issue_date, status, notes, created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          [uuid(), companyId, r.cheque_no, r.bank_name, r.direction,
+           r.party_id, r.party_name, r.amount, r.cheque_date, r.issue_date,
+           r.status, r.notes, req.user.id]
+        )
+      }
+      await client.query('COMMIT')
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
+    }
+
+    res.json({ data: { imported: valid.length, skipped_errors: errors.length, skipped_duplicates: dupes.length } })
+  } catch (err) { next(err) }
+})
 
 module.exports = router;

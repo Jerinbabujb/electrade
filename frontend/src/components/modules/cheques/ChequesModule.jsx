@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { chequeApi } from '../../../services/api'
 import CustomerTypeahead from '../shared/CustomerTypeahead'
@@ -18,11 +18,193 @@ const empty = {
   purchase_id:'', invoice_id:'', notes:'',
 }
 
+// ── Import Modal ───────────────────────────────────────────────
+function ImportModal({ onClose, onDone }) {
+  const fileRef   = useRef()
+  const [file,    setFile]    = useState(null)
+  const [preview, setPreview] = useState(null)   // { rows, valid, errors, duplicates }
+  const [stage,   setStage]   = useState('pick') // 'pick' | 'preview' | 'done'
+  const [result,  setResult]  = useState(null)
+  const [busy,    setBusy]    = useState(false)
+
+  const handleFile = async (f) => {
+    if (!f) return
+    setFile(f)
+    setBusy(true)
+    try {
+      const res = await chequeApi.preview(f)
+      setPreview(res.data.data)
+      setStage('preview')
+    } catch (e) {
+      toast.error(e.response?.data?.error?.message || 'Failed to parse file')
+    } finally { setBusy(false) }
+  }
+
+  const handleImport = async () => {
+    setBusy(true)
+    try {
+      const res = await chequeApi.import(file)
+      setResult(res.data.data)
+      setStage('done')
+      onDone()
+    } catch (e) {
+      toast.error(e.response?.data?.error?.message || 'Import failed')
+    } finally { setBusy(false) }
+  }
+
+  const statusColor = { pending:'#f57c00', cleared:'#2e7d32', bounced:'#c62828', cancelled:'#888' }
+  const dirColor    = { issued:'#c62828', received:'#2e7d32' }
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="modal" style={{ maxWidth: 900, width: '95vw' }}>
+
+        <div className="modal-header">
+          <h3>📥 Import Cheques from Excel</h3>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        {/* ── Step: pick file ── */}
+        {stage === 'pick' && (
+          <div className="modal-body" style={{ padding: 20 }}>
+            <div style={{ marginBottom: 16, padding: '10px 14px', background: '#e3f2fd', border: '1px solid #90caf9', borderRadius: 4, fontSize: 12 }}>
+              <strong>Step 1 — Download the template</strong>, fill it with your cheque register data, then upload it here.
+              The import supports both <em>Issued</em> (outgoing) and <em>Received</em> (incoming) cheques in one file.
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 20 }}>
+              <a href={chequeApi.templateUrl()} download
+                style={{ display:'inline-block', padding:'7px 14px', background:'#1976d2', color:'#fff',
+                         borderRadius:4, fontSize:12, fontWeight:600, textDecoration:'none' }}>
+                ⬇ Download Template
+              </a>
+              <span style={{ fontSize: 11, color: '#666' }}>
+                (.xlsx — includes a Guide sheet explaining each column)
+              </span>
+            </div>
+            <div style={{ marginBottom: 8, fontSize: 12, fontWeight: 600, color: '#333' }}>
+              Step 2 — Upload your filled file:
+            </div>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: 'none' }}
+              onChange={e => handleFile(e.target.files[0])} />
+            <div
+              style={{ border: '2px dashed #90caf9', borderRadius: 6, padding: '28px 20px', textAlign: 'center',
+                       cursor: 'pointer', background: '#fafeff', color: '#555' }}
+              onClick={() => fileRef.current.click()}
+              onDrop={e => { e.preventDefault(); handleFile(e.dataTransfer.files[0]) }}
+              onDragOver={e => e.preventDefault()}>
+              {busy ? '⏳ Parsing…' : '📂 Click to choose or drag & drop your Excel file here'}
+            </div>
+          </div>
+        )}
+
+        {/* ── Step: preview ── */}
+        {stage === 'preview' && preview && (
+          <>
+            <div style={{ padding: '8px 14px', background: '#f5f5f5', borderBottom: '1px solid #e0e0e0',
+                          fontSize: 12, display: 'flex', gap: 20, alignItems: 'center' }}>
+              <span style={{ color: '#2e7d32', fontWeight: 700 }}>✓ {preview.valid} ready to import</span>
+              {preview.duplicates > 0 && <span style={{ color: '#f57c00', fontWeight: 600 }}>⟳ {preview.duplicates} already exist (will skip)</span>}
+              {preview.errors    > 0 && <span style={{ color: '#c62828', fontWeight: 600 }}>✕ {preview.errors} rows with errors (will skip)</span>}
+            </div>
+            <div className="modal-toolbar">
+              <button className="btn primary" onClick={handleImport}
+                disabled={busy || preview.valid === 0}>
+                {busy ? '⏳ Importing…' : `✓ Import ${preview.valid} Cheques`}
+              </button>
+              <button className="btn" onClick={() => { setStage('pick'); setFile(null); setPreview(null) }}>
+                ← Choose different file
+              </button>
+              <button className="btn" style={{ marginLeft: 'auto' }} onClick={onClose}>Cancel</button>
+            </div>
+            <div className="grid-wrap" style={{ maxHeight: 400 }}>
+              <table className="data-table" style={{ fontSize: 11 }}>
+                <thead>
+                  <tr>
+                    <th style={{ width: 36 }}>Row</th>
+                    <th style={{ width: 20 }}></th>
+                    <th>Cheque No</th><th>Bank</th><th>Direction</th>
+                    <th>Party</th><th className="right">Amount BHD</th>
+                    <th>Issue Date</th><th>Cheque Date</th><th>Status</th><th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {preview.rows.map(r => {
+                    const hasErr = r.errors.length > 0
+                    const rowBg  = hasErr ? '#fff0f0' : r.is_duplicate ? '#fffde7' : 'inherit'
+                    return (
+                      <tr key={r.row} style={{ background: rowBg }}>
+                        <td style={{ color: '#999', fontSize: 10 }}>{r.row}</td>
+                        <td style={{ textAlign: 'center' }}>
+                          {hasErr        ? <span title={r.errors.join('; ')} style={{ cursor:'help', color:'#c62828' }}>✕</span>
+                           : r.is_duplicate ? <span title="Already exists" style={{ color:'#f57c00' }}>⟳</span>
+                           : <span style={{ color:'#2e7d32' }}>✓</span>}
+                        </td>
+                        <td style={{ fontWeight: 600, color: 'var(--blue)' }}>{r.cheque_no || '—'}</td>
+                        <td>{r.bank_name || '—'}</td>
+                        <td>
+                          {r.direction
+                            ? <span style={{ fontWeight:600, color: dirColor[r.direction] }}>
+                                {r.direction === 'issued' ? '↑ Issued' : '↓ Received'}
+                              </span>
+                            : <span style={{ color:'#c62828' }}>?</span>}
+                        </td>
+                        <td>
+                          {r.party_name || '—'}
+                          {r.party_matched && <span title="Matched to existing record" style={{ marginLeft:4, fontSize:10, color:'#2e7d32' }}>✓</span>}
+                        </td>
+                        <td className="right" style={{ fontWeight: 600 }}>
+                          {r.amount != null ? r.amount.toFixed(3) : <span style={{ color:'#c62828' }}>?</span>}
+                        </td>
+                        <td>{r.issue_date  || '—'}</td>
+                        <td>{r.cheque_date || <span style={{ color:'#c62828' }}>?</span>}</td>
+                        <td>
+                          <span style={{ fontWeight:600, color: statusColor[r.status] || '#888' }}>
+                            {r.status ? r.status.charAt(0).toUpperCase() + r.status.slice(1) : '—'}
+                          </span>
+                        </td>
+                        <td style={{ maxWidth:120, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', color:'#666' }}>
+                          {r.notes || '—'}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {preview.errors > 0 && (
+              <div style={{ padding:'6px 14px', fontSize:11, color:'#c62828', background:'#fff0f0', borderTop:'1px solid #ffcdd2' }}>
+                Red rows have errors — hover the ✕ icon to see details. Fix them in your Excel and re-upload.
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── Step: done ── */}
+        {stage === 'done' && result && (
+          <div className="modal-body" style={{ padding: 24, textAlign: 'center' }}>
+            <div style={{ fontSize: 36, marginBottom: 8 }}>✅</div>
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Import Complete</div>
+            <div style={{ display:'flex', gap:24, justifyContent:'center', fontSize:14, marginBottom:20 }}>
+              <span><strong style={{ color:'#2e7d32', fontSize:22 }}>{result.imported}</strong><br/>imported</span>
+              {result.skipped_duplicates > 0 && <span><strong style={{ color:'#f57c00', fontSize:22 }}>{result.skipped_duplicates}</strong><br/>already existed</span>}
+              {result.skipped_errors     > 0 && <span><strong style={{ color:'#c62828', fontSize:22 }}>{result.skipped_errors}</strong><br/>had errors</span>}
+            </div>
+            <button className="btn primary" onClick={onClose}>Close</button>
+          </div>
+        )}
+
+      </div>
+    </div>
+  )
+}
+
+// ── Main Module ────────────────────────────────────────────────
 export default function ChequesModule() {
   const qc = useQueryClient()
   const [filters, setFilters] = useState({ direction:'', status:'pending', q:'' })
   const [selectedId, setSelectedId] = useState(null)
   const [showForm, setShowForm] = useState(false)
+  const [showImport, setShowImport] = useState(false)
   const [form, setForm] = useState(empty)
   const F = (k,v) => setForm(f=>({...f,[k]:v}))
 
@@ -61,6 +243,7 @@ export default function ChequesModule() {
       <div className="toolbar">
         <button className="btn primary" onClick={()=>{ setForm({...empty,direction:'issued'}); setShowForm(true) }}>＋ Issued Cheque</button>
         <button className="btn" style={{background:'#e8f5e9',borderColor:'#a5d6a7',color:'#2e7d32'}} onClick={()=>{ setForm({...empty,direction:'received'}); setShowForm(true) }}>＋ Received Cheque</button>
+        <button className="btn" style={{background:'#e8eaf6',borderColor:'#9fa8da',color:'#283593'}} onClick={()=>setShowImport(true)}>📥 Import Excel</button>
         <div className="toolbar-sep"/>
         <button className="btn" style={{background:'#e8f5e9',borderColor:'#a5d6a7',color:'#2e7d32'}}
           disabled={!selectedId || sel?.status!=='pending'}
@@ -143,6 +326,13 @@ export default function ChequesModule() {
         <span>Total: <strong>BHD {fmtBhd(totals.total)}</strong></span><span>|</span>
         <span>Pending: <strong style={{color:'#f57c00'}}>BHD {fmtBhd(totals.pending)}</strong></span>
       </div>
+
+      {showImport && (
+        <ImportModal
+          onClose={() => setShowImport(false)}
+          onDone={() => { qc.invalidateQueries(['cheques']); qc.invalidateQueries(['fin-summary']) }}
+        />
+      )}
 
       {showForm && (
         <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setShowForm(false)}>

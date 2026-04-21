@@ -176,11 +176,14 @@ export const inviteApi = {
 
 // ── Cheques ────────────────────────────────────
 export const chequeApi = {
-  list:    (params)     => api.get('/cheques', { params }),
-  summary: ()           => api.get('/cheques/summary'),
-  create:  (data)       => api.post('/cheques', data),
-  setStatus: (id, data) => api.patch(`/cheques/${id}/status`, data),
-  delete:  (id)         => api.delete(`/cheques/${id}`),
+  list:      (params)     => api.get('/cheques', { params }),
+  summary:   ()           => api.get('/cheques/summary'),
+  create:    (data)       => api.post('/cheques', data),
+  setStatus: (id, data)   => api.patch(`/cheques/${id}/status`, data),
+  delete:    (id)         => api.delete(`/cheques/${id}`),
+  preview:   (file)       => { const fd = new FormData(); fd.append('file', file); return api.post('/cheques/import?preview=1', fd) },
+  import:    (file)       => { const fd = new FormData(); fd.append('file', file); return api.post('/cheques/import', fd) },
+  templateUrl: ()         => `/api/v1/cheques/import-template?token=${localStorage.getItem('et_token')}`,
 }
 
 // ── HR ─────────────────────────────────────────
