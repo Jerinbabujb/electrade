@@ -293,6 +293,7 @@ async function runRecurringExpenses() {
       FROM recurring_expense_templates t
       JOIN companies c ON c.id = t.company_id
       WHERE t.is_active = true
+        AND t.auto_post = true
         AND t.next_due_date <= $1
         AND (t.end_date IS NULL OR t.end_date >= $1)
         AND (t.last_generated IS NULL OR t.last_generated < t.next_due_date)
@@ -362,6 +363,101 @@ function advanceDate(frequency, dayOfMonth, fromDateStr) {
   }
 }
 
+// ── Recurring Expense Reminders ───────────────────────────────────────────────
+/**
+ * For each company with recur_reminder_enabled:
+ *  - Find active templates where next_due_date falls within any of the template's
+ *    reminder_days thresholds (e.g. 30, 7 days before due)
+ *  - Skip items already reminded within the last 24 hours (dedup by audit_log)
+ *  - Send one consolidated email per company to recur_reminder_email
+ *  - Update recur_reminder_last_run in automation_settings
+ */
+async function runRecurringReminders(companyId = null) {
+  try {
+    const { rows: settings } = await db.query(`
+      SELECT a.company_id, a.recur_reminder_email, c.name AS company_name
+      FROM automation_settings a
+      JOIN companies c ON c.id = a.company_id
+      WHERE a.recur_reminder_enabled = true
+        AND a.recur_reminder_email IS NOT NULL
+        AND a.recur_reminder_email <> ''
+        ${companyId ? 'AND a.company_id = $1' : ''}
+    `, companyId ? [companyId] : [])
+
+    let totalSent = 0
+
+    for (const cfg of settings) {
+      try {
+        const today = new Date().toISOString().split('T')[0]
+
+        // Find active templates where today matches any reminder threshold
+        // i.e. (next_due_date - today) = one of the reminder_days values
+        // Also include overdue items (next_due_date < today) not yet reminded today
+        const { rows: items } = await db.query(`
+          SELECT t.id, t.description, t.total_amount, t.next_due_date,
+                 t.frequency, t.notes, t.reminder_days,
+                 ($1::date - t.next_due_date::date) AS days_overdue,
+                 (t.next_due_date::date - $1::date) AS days_until_due,
+                 cat.name AS category_name
+          FROM recurring_expense_templates t
+          LEFT JOIN categories cat ON cat.id = t.category_id
+          WHERE t.company_id = $2
+            AND t.is_active = true
+            AND (t.end_date IS NULL OR t.end_date >= $1)
+            AND (
+              -- Overdue: past due date
+              t.next_due_date < $1
+              OR
+              -- Upcoming: days until due matches one of the configured reminder thresholds
+              (t.next_due_date::date - $1::date) = ANY(t.reminder_days)
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM audit_log al
+              WHERE al.company_id = t.company_id
+                AND al.action     = 'recurring.reminder_sent'
+                AND al.entity_id  = t.id::text
+                AND al.created_at > now() - INTERVAL '23 hours'
+            )
+          ORDER BY t.next_due_date ASC
+        `, [today, cfg.company_id])
+
+        if (items.length === 0) continue
+
+        await emailSvc.sendRecurringReminder(items, cfg.recur_reminder_email, cfg.company_id)
+
+        // Log each item reminded (for dedup check above)
+        for (const item of items) {
+          await audit.log(db,
+            { company_id: cfg.company_id, id: null, name: 'system' },
+            'recurring.reminder_sent', 'recurring_expense_template',
+            item.id, item.description,
+            null, {
+              email: cfg.recur_reminder_email,
+              next_due_date: item.next_due_date,
+              days_until_due: item.days_until_due,
+            })
+        }
+
+        await db.query(`
+          UPDATE automation_settings
+          SET recur_reminder_last_run = now()
+          WHERE company_id = $1
+        `, [cfg.company_id])
+
+        console.log(`[scheduler] Recurring reminders: ${items.length} item(s) for ${cfg.company_name}`)
+        totalSent++
+      } catch (companyErr) {
+        console.error(`[scheduler] Recurring reminder error for company ${cfg.company_id}:`, companyErr.message)
+      }
+    }
+
+    return { sent: totalSent }
+  } catch (err) {
+    console.error('[scheduler] runRecurringReminders failed:', err.message)
+    return { sent: 0, error: err.message }
+  }
+}
+
 function reloadAutomation() {
   if (automationTask) { automationTask.stop(); automationTask = null }
 
@@ -369,10 +465,11 @@ function reloadAutomation() {
   automationTask = cron.schedule('0 8 * * *', async () => {
     console.log('[scheduler] Running daily automation jobs…')
     await runRecurringExpenses()
+    await runRecurringReminders()
     await runOverdueReminders()
     await runLowStockAlerts()
   })
   console.log('[scheduler] Automation jobs scheduled — daily at 08:00')
 }
 
-module.exports = { reload, init, reloadAutomation, runOverdueReminders, runLowStockAlerts, runRecurringExpenses };
+module.exports = { reload, init, reloadAutomation, runOverdueReminders, runLowStockAlerts, runRecurringExpenses, runRecurringReminders };

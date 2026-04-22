@@ -23,15 +23,18 @@ r.get('/', async (req, res, next) => {
     // Return defaults when no row exists yet
     res.json({
       data: row || {
-        company_id:            req.user.company_id,
-        overdue_enabled:       false,
-        overdue_interval_days: 7,
-        lowstock_enabled:      false,
-        lowstock_alert_email:  null,
-        overdue_last_run:      null,
-        overdue_last_count:    0,
-        lowstock_last_run:     null,
-        lowstock_last_count:   0,
+        company_id:               req.user.company_id,
+        overdue_enabled:          false,
+        overdue_interval_days:    7,
+        lowstock_enabled:         false,
+        lowstock_alert_email:     null,
+        overdue_last_run:         null,
+        overdue_last_count:       0,
+        lowstock_last_run:        null,
+        lowstock_last_count:      0,
+        recur_reminder_enabled:   false,
+        recur_reminder_email:     null,
+        recur_reminder_last_run:  null,
       }
     })
   } catch (err) { next(err) }
@@ -45,26 +48,34 @@ r.put('/', authorize('admin'), async (req, res, next) => {
       overdue_interval_days,
       lowstock_enabled,
       lowstock_alert_email,
+      recur_reminder_enabled,
+      recur_reminder_email,
     } = req.body
 
     const { rows: [row] } = await db.query(`
       INSERT INTO automation_settings
         (company_id, overdue_enabled, overdue_interval_days,
-         lowstock_enabled, lowstock_alert_email, updated_at)
-      VALUES ($1,$2,$3,$4,$5,now())
+         lowstock_enabled, lowstock_alert_email,
+         recur_reminder_enabled, recur_reminder_email,
+         updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,now())
       ON CONFLICT (company_id) DO UPDATE SET
-        overdue_enabled       = EXCLUDED.overdue_enabled,
-        overdue_interval_days = EXCLUDED.overdue_interval_days,
-        lowstock_enabled      = EXCLUDED.lowstock_enabled,
-        lowstock_alert_email  = EXCLUDED.lowstock_alert_email,
-        updated_at            = now()
+        overdue_enabled         = EXCLUDED.overdue_enabled,
+        overdue_interval_days   = EXCLUDED.overdue_interval_days,
+        lowstock_enabled        = EXCLUDED.lowstock_enabled,
+        lowstock_alert_email    = EXCLUDED.lowstock_alert_email,
+        recur_reminder_enabled  = EXCLUDED.recur_reminder_enabled,
+        recur_reminder_email    = EXCLUDED.recur_reminder_email,
+        updated_at              = now()
       RETURNING *
     `, [
       req.user.company_id,
-      overdue_enabled       ?? false,
-      overdue_interval_days ?? 7,
-      lowstock_enabled      ?? false,
-      lowstock_alert_email  || null,
+      overdue_enabled        ?? false,
+      overdue_interval_days  ?? 7,
+      lowstock_enabled       ?? false,
+      lowstock_alert_email   || null,
+      recur_reminder_enabled ?? false,
+      recur_reminder_email   || null,
     ])
 
     // Reload automation scheduler with new settings
@@ -86,6 +97,9 @@ r.post('/run-now', authorize('admin'), async (req, res, next) => {
     }
     if (!job || job === 'lowstock' || job === 'all') {
       results.lowstock = await scheduler.runLowStockAlerts(req.user.company_id)
+    }
+    if (!job || job === 'recur_reminder' || job === 'all') {
+      results.recur_reminder = await scheduler.runRecurringReminders(req.user.company_id)
     }
 
     res.json({ message: 'Jobs completed', results })

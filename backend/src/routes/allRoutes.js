@@ -760,17 +760,21 @@ module.exports.recurringExpensesRouter = (() => {
   r.post('/', authorize('admin','accountant'), async (req, res, next) => {
     try {
       const { category_id, supplier_id, description, net_amount, vat_amount,
-              frequency, day_of_month, next_due_date, end_date, notes } = req.body
+              frequency, day_of_month, next_due_date, end_date, notes,
+              auto_post, reminder_days } = req.body
       const total = (parseFloat(net_amount||0) + parseFloat(vat_amount||0)).toFixed(3)
+      const rdArr = Array.isArray(reminder_days) ? reminder_days : [30, 7]
       const { rows: [row] } = await db.query(
         `INSERT INTO recurring_expense_templates
            (company_id, category_id, supplier_id, description, net_amount, vat_amount,
-            total_amount, frequency, day_of_month, next_due_date, end_date, notes, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::recur_frequency,$9,$10,$11,$12,$13) RETURNING *`,
+            total_amount, frequency, day_of_month, next_due_date, end_date, notes,
+            auto_post, reminder_days, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::recur_frequency,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
         [req.user.company_id, category_id||null, supplier_id||null, description,
          net_amount, vat_amount||0, total,
          frequency||'monthly', day_of_month||1,
-         next_due_date, end_date||null, notes||null, req.user.id])
+         next_due_date, end_date||null, notes||null,
+         auto_post !== false, rdArr, req.user.id])
       res.status(201).json({ data: row })
     } catch (err) { next(err) }
   })
@@ -779,17 +783,21 @@ module.exports.recurringExpensesRouter = (() => {
   r.put('/:id', authorize('admin','accountant'), async (req, res, next) => {
     try {
       const { category_id, supplier_id, description, net_amount, vat_amount,
-              frequency, day_of_month, next_due_date, end_date, notes, is_active } = req.body
+              frequency, day_of_month, next_due_date, end_date, notes, is_active,
+              auto_post, reminder_days } = req.body
       const total = (parseFloat(net_amount||0) + parseFloat(vat_amount||0)).toFixed(3)
+      const rdArr = Array.isArray(reminder_days) ? reminder_days : [30, 7]
       const { rows: [row] } = await db.query(
         `UPDATE recurring_expense_templates SET
            category_id=$1, supplier_id=$2, description=$3, net_amount=$4, vat_amount=$5,
            total_amount=$6, frequency=$7::recur_frequency, day_of_month=$8,
-           next_due_date=$9, end_date=$10, notes=$11, is_active=$12, updated_at=now()
-         WHERE id=$13 AND company_id=$14 RETURNING *`,
+           next_due_date=$9, end_date=$10, notes=$11, is_active=$12,
+           auto_post=$13, reminder_days=$14, updated_at=now()
+         WHERE id=$15 AND company_id=$16 RETURNING *`,
         [category_id||null, supplier_id||null, description, net_amount, vat_amount||0, total,
          frequency||'monthly', day_of_month||1, next_due_date, end_date||null,
          notes||null, is_active !== false,
+         auto_post !== false, rdArr,
          req.params.id, req.user.company_id])
       if (!row) return res.status(404).json({ error: { message: 'Not found' } })
       res.json({ data: row })
@@ -842,6 +850,62 @@ module.exports.recurringExpensesRouter = (() => {
           [uuid(), tmpl.company_id, expense_no, tmpl.category_id, tmpl.supplier_id,
            expense_date, tmpl.description, tmpl.net_amount, tmpl.vat_amount, tmpl.total_amount,
            tmpl.notes, req.user.id])
+
+        const newNext = nextDueDate(tmpl.frequency, tmpl.day_of_month, expense_date)
+        await client.query(
+          `UPDATE recurring_expense_templates
+           SET last_generated=$1, next_due_date=$2, updated_at=now() WHERE id=$3`,
+          [expense_date, newNext, tmpl.id])
+        await client.query('COMMIT')
+        res.status(201).json({ data: exp, next_due_date: newNext })
+      } catch (e) { await client.query('ROLLBACK'); throw e }
+      finally { client.release() }
+    } catch (err) { next(err) }
+  })
+
+  // Confirm payment — record the actual expense and advance the schedule
+  // Used when auto_post=false (user must confirm payment before expense is posted)
+  r.post('/:id/confirm-payment', authorize('admin','accountant'), async (req, res, next) => {
+    try {
+      const { rows: [tmpl] } = await db.query(
+        `SELECT * FROM recurring_expense_templates WHERE id=$1 AND company_id=$2`,
+        [req.params.id, req.user.company_id])
+      if (!tmpl) return res.status(404).json({ error: { message: 'Not found' } })
+
+      const {
+        payment_date,
+        actual_amount,
+        payment_method,
+        payment_reference,
+        notes: paymentNotes,
+      } = req.body
+
+      const expense_date = payment_date || new Date().toISOString().split('T')[0]
+      const net    = parseFloat(actual_amount ?? tmpl.net_amount)
+      const vat    = parseFloat(tmpl.vat_amount)
+      const total  = (net + vat).toFixed(3)
+
+      const { rows: [co] } = await db.query(
+        `SELECT COUNT(*) AS cnt FROM expenses WHERE company_id = $1`, [tmpl.company_id])
+      const expense_no = `EXP-${new Date(expense_date).getFullYear()}-${String(parseInt(co.cnt)+1).padStart(4,'0')}`
+
+      const notesParts = []
+      if (tmpl.notes)        notesParts.push(tmpl.notes)
+      if (payment_method)    notesParts.push(`Payment: ${payment_method}`)
+      if (payment_reference) notesParts.push(`Ref: ${payment_reference}`)
+      if (paymentNotes)      notesParts.push(paymentNotes)
+      const combinedNotes = notesParts.join(' | ') || null
+
+      const client = await db.pool.connect()
+      try {
+        await client.query('BEGIN')
+        const { rows: [exp] } = await client.query(
+          `INSERT INTO expenses (id,company_id,expense_no,category_id,supplier_id,expense_date,
+             description,net_amount,vat_amount,total_amount,notes,created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          [uuid(), tmpl.company_id, expense_no, tmpl.category_id, tmpl.supplier_id,
+           expense_date, tmpl.description, net.toFixed(3), vat.toFixed(3), total,
+           combinedNotes, req.user.id])
 
         const newNext = nextDueDate(tmpl.frequency, tmpl.day_of_month, expense_date)
         await client.query(

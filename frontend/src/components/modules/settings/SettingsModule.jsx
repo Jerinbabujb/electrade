@@ -213,15 +213,17 @@ function AutomationTab() {
   })
 
   const [form, setForm] = useState(null)
-  const [running, setRunning] = useState(null)  // 'overdue' | 'lowstock' | null
+  const [running, setRunning] = useState(null)  // 'overdue' | 'lowstock' | 'recur_reminder' | null
 
   // Sync form with fetched data
   if (data && !form) {
     setForm({
-      overdue_enabled:       data.overdue_enabled       ?? false,
-      overdue_interval_days: data.overdue_interval_days ?? 7,
-      lowstock_enabled:      data.lowstock_enabled      ?? false,
-      lowstock_alert_email:  data.lowstock_alert_email  ?? '',
+      overdue_enabled:        data.overdue_enabled        ?? false,
+      overdue_interval_days:  data.overdue_interval_days  ?? 7,
+      lowstock_enabled:       data.lowstock_enabled       ?? false,
+      lowstock_alert_email:   data.lowstock_alert_email   ?? '',
+      recur_reminder_enabled: data.recur_reminder_enabled ?? false,
+      recur_reminder_email:   data.recur_reminder_email   ?? '',
     })
   }
 
@@ -237,8 +239,9 @@ function AutomationTab() {
       const { data: res } = await automationApi.runNow(job)
       const r = res.results || {}
       const parts = []
-      if (r.overdue)  parts.push(`${r.overdue.sent  ?? 0} reminder${r.overdue.sent  === 1 ? '' : 's'} sent`)
-      if (r.lowstock) parts.push(`${r.lowstock.alerts_sent ?? 0} alert${r.lowstock.alerts_sent === 1 ? '' : 's'} sent`)
+      if (r.overdue)        parts.push(`${r.overdue.sent  ?? 0} reminder${r.overdue.sent  === 1 ? '' : 's'} sent`)
+      if (r.lowstock)       parts.push(`${r.lowstock.alerts_sent ?? 0} alert${r.lowstock.alerts_sent === 1 ? '' : 's'} sent`)
+      if (r.recur_reminder) parts.push(`${r.recur_reminder.sent ?? 0} recurring reminder${r.recur_reminder.sent === 1 ? '' : 's'} sent`)
       toast.success(`${label}: ${parts.join(', ') || 'done'}`)
       qc.invalidateQueries(['automation-settings'])
     } catch (e) {
@@ -251,7 +254,9 @@ function AutomationTab() {
   const fmtRun = (ts, count, noun) => {
     if (!ts) return 'Never run'
     const d = new Date(ts)
-    return `Last run: ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${count} ${noun}${count === 1 ? '' : 's'} sent`
+    const base = `Last run: ${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    if (count == null || noun == null) return base
+    return `${base} · ${count} ${noun}${count === 1 ? '' : 's'} sent`
   }
 
   if (isLoading || !form) return <div style={{ padding: 20, color: '#888' }}>Loading…</div>
@@ -342,6 +347,38 @@ function AutomationTab() {
           {fmtRun(data?.lowstock_last_run, data?.lowstock_last_count ?? 0, 'alert')}
         </div>
       </>, form.lowstock_enabled)}
+
+      {/* Recurring Expense Reminders */}
+      {card(<>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', flex: 1 }}>
+            <input type="checkbox" checked={form.recur_reminder_enabled}
+              onChange={e => set('recur_reminder_enabled', e.target.checked)} />
+            <span style={{ fontWeight: 700, fontSize: 13 }}>🔔 Recurring Expense Reminders</span>
+          </label>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }}
+            disabled={running === 'recur_reminder'} onClick={() => runJob('recur_reminder', 'Recurring reminders')}>
+            {running === 'recur_reminder' ? 'Running…' : 'Run Now'}
+          </button>
+        </div>
+        <div style={{ fontSize: 12, color: '#555' }}>
+          Sends email reminders for upcoming and overdue recurring expenses (licence renewals, utilities, etc.).
+          Each template has its own reminder schedule (e.g. 30 and 7 days before due).
+        </div>
+        {form.recur_reminder_enabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 12, color: '#555' }}>Reminder email:</span>
+            <input type="email" value={form.recur_reminder_email}
+              onChange={e => set('recur_reminder_email', e.target.value)}
+              placeholder="accounts@company.com"
+              style={{ flex: 1, fontSize: 12, padding: '4px 8px',
+                       border: '1px solid #ccc', borderRadius: 4 }} />
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: '#aaa' }}>
+          {fmtRun(data?.recur_reminder_last_run, null, null)}
+        </div>
+      </>, form.recur_reminder_enabled)}
 
       {/* Save */}
       <div style={{ display: 'flex', gap: 8 }}>

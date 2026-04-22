@@ -324,3 +324,84 @@ exports.sendLowStockAlert = async (products, toEmail, company_id) => {
     html,
   })
 }
+
+// ── Send recurring expense reminder ───────────────────────
+// items: [{ description, next_due_date, total_amount, frequency, days_until_due, notes }]
+exports.sendRecurringReminder = async (items, toEmail, company_id) => {
+  const co    = await getCompany(company_id)
+  const brand = brandColor(co)
+
+  const overdue  = items.filter(i => i.days_until_due < 0)
+  const dueToday = items.filter(i => i.days_until_due === 0)
+  const upcoming = items.filter(i => i.days_until_due > 0)
+
+  const urgencyColor = overdue.length ? '#c62828' : dueToday.length ? '#e65100' : '#1565c0'
+  const urgencyLabel = overdue.length
+    ? `${overdue.length} overdue payment${overdue.length > 1 ? 's' : ''} requiring immediate action`
+    : dueToday.length
+    ? `${dueToday.length} payment${dueToday.length > 1 ? 's' : ''} due today`
+    : `${upcoming.length} upcoming payment${upcoming.length > 1 ? 's' : ''} — action required`
+
+  const itemRow = (item) => {
+    const daysLabel = item.days_until_due < 0
+      ? `<span style="color:#c62828;font-weight:700">${Math.abs(item.days_until_due)} days OVERDUE</span>`
+      : item.days_until_due === 0
+      ? `<span style="color:#e65100;font-weight:700">Due TODAY</span>`
+      : `<span style="color:#1565c0;font-weight:700">Due in ${item.days_until_due} days</span>`
+    return `
+    <tr>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0;font-weight:600">${item.description}</td>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0;text-align:right;font-weight:700">
+        BHD ${parseFloat(item.total_amount).toFixed(3)}
+      </td>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0">${fmtDate(item.next_due_date)}</td>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0">${daysLabel}</td>
+      <td style="padding:8px 10px;border:1px solid #e0e0e0;font-size:11px;color:#888">${item.notes || '—'}</td>
+    </tr>`
+  }
+
+  const totalDue = items.reduce((s, i) => s + parseFloat(i.total_amount || 0), 0)
+
+  const html = `
+  <div style="font-family:Arial,sans-serif;font-size:13px;color:#1a1a1a;max-width:680px">
+    ${emailHeader(co)}
+    <div style="padding:20px">
+      <div style="background:${urgencyColor}18;border-left:4px solid ${urgencyColor};padding:10px 14px;margin-bottom:16px;font-size:13px">
+        <strong style="color:${urgencyColor}">🔔 Payment Reminder — ${urgencyLabel}</strong>
+      </div>
+      <p style="margin-bottom:16px;color:#555">
+        The following recurring payments require your attention.
+        Please make the necessary payments and record them in the system.
+      </p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px">
+        <thead>
+          <tr style="background:${brand};color:#fff">
+            <th style="padding:7px 10px;text-align:left">Description</th>
+            <th style="padding:7px 10px;text-align:right">Amount (BHD)</th>
+            <th style="padding:7px 10px;text-align:left">Due Date</th>
+            <th style="padding:7px 10px;text-align:left">Status</th>
+            <th style="padding:7px 10px;text-align:left">Notes / Ref</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${[...overdue, ...dueToday, ...upcoming].map(itemRow).join('')}
+        </tbody>
+      </table>
+      <div style="background:#f8f8f8;border:1px solid #e0e0e0;padding:10px 14px;border-radius:4px;font-size:13px">
+        Total due: <strong style="color:${urgencyColor};font-size:15px">BHD ${totalDue.toFixed(3)}</strong>
+      </div>
+      <p style="margin-top:16px;font-size:11px;color:#888">
+        After making payment, log in to record the transaction: Expenses → Recurring Templates → Post Now.
+        This automated reminder was sent from ${co.name || 'ElecTrade'}.
+      </p>
+    </div>
+    ${emailFooter(co)}
+  </div>`
+
+  await transporter.sendMail({
+    from:    fromAddr(co),
+    to:      toEmail,
+    subject: `[Payment Reminder] ${urgencyLabel} — ${co.name || 'ElecTrade'}`,
+    html,
+  })
+}

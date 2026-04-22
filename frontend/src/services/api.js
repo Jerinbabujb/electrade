@@ -135,12 +135,13 @@ export const expenseApi = {
 }
 
 export const recurringExpenseApi = {
-  list:     ()           => api.get('/recurring-expenses'),
-  create:   (data)       => api.post('/recurring-expenses', data),
-  update:   (id, data)   => api.put(`/recurring-expenses/${id}`, data),
-  toggle:   (id)         => api.patch(`/recurring-expenses/${id}/toggle`),
-  delete:   (id)         => api.delete(`/recurring-expenses/${id}`),
-  generate: (id, data)   => api.post(`/recurring-expenses/${id}/generate`, data || {}),
+  list:           ()           => api.get('/recurring-expenses'),
+  create:         (data)       => api.post('/recurring-expenses', data),
+  update:         (id, data)   => api.put(`/recurring-expenses/${id}`, data),
+  toggle:         (id)         => api.patch(`/recurring-expenses/${id}/toggle`),
+  delete:         (id)         => api.delete(`/recurring-expenses/${id}`),
+  generate:       (id, data)   => api.post(`/recurring-expenses/${id}/generate`, data || {}),
+  confirmPayment: (id, data)   => api.post(`/recurring-expenses/${id}/confirm-payment`, data),
 }
 
 // ── Bank ───────────────────────────────────────
