@@ -30,7 +30,8 @@ async function htmlToPdf(html) {
 
 function printControls(brand) {
   return `
-<div style="position:fixed;top:10px;right:12px;display:flex;gap:8px;z-index:999;background:rgba(255,255,255,.92);padding:6px 8px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">
+<style>@media print{#print-controls{display:none!important}}</style>
+<div id="print-controls" style="position:fixed;top:10px;right:12px;display:flex;gap:8px;z-index:999;background:rgba(255,255,255,.92);padding:6px 8px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,.15)">
   <button id="btnPrint" style="padding:6px 16px;background:${brand};color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600">🖨 Print</button>
   <button id="btnClose" style="padding:6px 14px;background:#f0f0f0;color:#333;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600">✕ Close</button>
 </div>
