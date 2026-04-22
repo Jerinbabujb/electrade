@@ -457,6 +457,7 @@ router.get('/:id/voucher', authenticate, async (req, res, next) => {
     if (!cheque) return res.status(404).json({ error: { message: 'Cheque not found' } });
     const html = pdfSvc.chequeVoucherHtml(cheque, cheque.company);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', "script-src 'unsafe-inline'; script-src-attr 'unsafe-inline'");
     res.send(html);
   } catch (err) { next(err); }
 });
@@ -474,6 +475,7 @@ router.get('/:id/print-cheque', authenticate, async (req, res, next) => {
     if (bank === 'nbb') html = pdfSvc.chequeNbbHtml(cheque, cheque.company);
     else return res.status(400).json({ error: { message: `Bank template "${bank}" not supported yet` } });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', "script-src 'unsafe-inline'; script-src-attr 'unsafe-inline'");
     res.send(html);
   } catch (err) { next(err); }
 });
