@@ -731,27 +731,13 @@ module.exports.recurringExpensesRouter = (() => {
     const d = fromDate ? new Date(fromDate) : new Date()
     const dom = Math.min(dayOfMonth || 1, 28)
     switch (frequency) {
-      case 'weekly': {
-        const n = new Date(d)
-        n.setDate(n.getDate() + 7)
-        return n.toISOString().split('T')[0]
-      }
-      case 'monthly': {
-        const n = new Date(d.getFullYear(), d.getMonth() + 1, dom)
-        return n.toISOString().split('T')[0]
-      }
-      case 'quarterly': {
-        const n = new Date(d.getFullYear(), d.getMonth() + 3, dom)
-        return n.toISOString().split('T')[0]
-      }
-      case 'yearly': {
-        const n = new Date(d.getFullYear() + 1, d.getMonth(), dom)
-        return n.toISOString().split('T')[0]
-      }
-      default: {
-        const n = new Date(d.getFullYear(), d.getMonth() + 1, dom)
-        return n.toISOString().split('T')[0]
-      }
+      case 'weekly':      return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).toISOString().split('T')[0]
+      case 'monthly':     return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
+      case 'quarterly':   return new Date(d.getFullYear(), d.getMonth() + 3,  dom).toISOString().split('T')[0]
+      case 'half_yearly': return new Date(d.getFullYear(), d.getMonth() + 6,  dom).toISOString().split('T')[0]
+      case 'yearly':      return new Date(d.getFullYear() + 1, d.getMonth(),  dom).toISOString().split('T')[0]
+      case 'bi_annual':   return new Date(d.getFullYear() + 2, d.getMonth(),  dom).toISOString().split('T')[0]
+      default:            return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
     }
   }
 

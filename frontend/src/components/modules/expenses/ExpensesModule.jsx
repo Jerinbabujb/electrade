@@ -4,8 +4,8 @@ import { expenseApi, recurringExpenseApi, categoryApi } from '../../../services/
 import { fmtBhd, fmtDate } from '../../../utils/format'
 import toast from 'react-hot-toast'
 
-const FREQ_LABEL = { weekly:'Weekly', monthly:'Monthly', quarterly:'Quarterly', yearly:'Yearly' }
-const FREQ_COLOR = { weekly:'#7b1fa2', monthly:'#1565c0', quarterly:'#2e7d32', yearly:'#e65100' }
+const FREQ_LABEL = { weekly:'Weekly', monthly:'Monthly', quarterly:'Quarterly', half_yearly:'Half-Yearly', yearly:'Yearly', bi_annual:'Every 2 Years' }
+const FREQ_COLOR = { weekly:'#7b1fa2', monthly:'#1565c0', quarterly:'#2e7d32', half_yearly:'#00695c', yearly:'#e65100', bi_annual:'#4e342e' }
 
 function CategoryManager({ onClose }) {
   const qc = useQueryClient()
@@ -78,8 +78,12 @@ export default function ExpensesModule() {
   const totalNet  = rows.reduce((s,r)=>s+parseFloat(r.net_amount||0),0)
   const totalVat  = rows.reduce((s,r)=>s+parseFloat(r.vat_amount||0),0)
 
-  const today = new Date().toISOString().split('T')[0]
+  const today   = new Date().toISOString().split('T')[0]
+  const in30    = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0]
+  const in60    = new Date(Date.now() + 60 * 86400000).toISOString().split('T')[0]
   const overdue  = recurRows.filter(r => r.is_active && r.next_due_date <= today)
+  const dueIn30  = recurRows.filter(r => r.is_active && r.next_due_date > today && r.next_due_date <= in30)
+  const dueIn60  = recurRows.filter(r => r.is_active && r.next_due_date > in30  && r.next_due_date <= in60)
   const upcoming = recurRows.filter(r => r.is_active && r.next_due_date > today)
 
   const deleteMut = useMutation({
@@ -133,7 +137,7 @@ export default function ExpensesModule() {
       {/* Tab bar */}
       <div style={{display:'flex',gap:0,padding:'0 12px',borderBottom:'2px solid #e0e0e0',flexShrink:0,background:'#fafafa'}}>
         {TAB('expenses', 'All Expenses')}
-        {TAB('recurring', `Recurring Templates${overdue.length ? ` ⚠ ${overdue.length} due` : ''}`)}
+        {TAB('recurring', `Recurring Templates${overdue.length ? ` ⚠ ${overdue.length} overdue` : dueIn30.length ? ` 🔔 ${dueIn30.length} due soon` : ''}`)}
       </div>
 
       {/* ── ALL EXPENSES TAB ── */}
@@ -187,9 +191,49 @@ export default function ExpensesModule() {
           </button>
         </div>
 
-        {overdue.length > 0 && (
-          <div style={{background:'#fff8e1',borderBottom:'1px solid #ffe082',padding:'6px 12px',fontSize:12,color:'#5d4037',flexShrink:0}}>
-            ⚠ <strong>{overdue.length} template{overdue.length>1?'s':''} due today or overdue</strong> — click <em>Post Now</em> to generate the expense entry, or they will be auto-posted tonight at 8:00 AM.
+        {(overdue.length > 0 || dueIn30.length > 0 || dueIn60.length > 0) && (
+          <div style={{flexShrink:0,borderBottom:'1px solid #e0e0e0'}}>
+            {/* Overdue row */}
+            {overdue.length > 0 && (
+              <div style={{background:'#fdecea',padding:'6px 12px',fontSize:12,color:'#b71c1c',display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
+                <span style={{fontWeight:700}}>⚠ {overdue.length} overdue</span>
+                {overdue.map(r => (
+                  <span key={r.id} style={{display:'inline-flex',alignItems:'center',gap:6,background:'rgba(0,0,0,.06)',borderRadius:12,padding:'2px 10px'}}>
+                    <span>{r.description}</span>
+                    <span style={{color:'#888',fontSize:10}}>{fmtDate(r.next_due_date)}</span>
+                    <button style={{fontSize:10,padding:'1px 7px',background:'#c62828',color:'#fff',border:'none',borderRadius:3,cursor:'pointer',fontWeight:700}}
+                      onClick={() => generateMut.mutate(r.id)} disabled={generateMut.isPending}>Post</button>
+                  </span>
+                ))}
+                <span style={{marginLeft:'auto',color:'#888',fontSize:11}}>Auto-posts at 08:00 if not actioned</span>
+              </div>
+            )}
+            {/* Due in 30 days row */}
+            {dueIn30.length > 0 && (
+              <div style={{background:'#fff8e1',padding:'5px 12px',fontSize:12,color:'#5d4037',display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
+                <span style={{fontWeight:700}}>🔔 Due within 30 days</span>
+                {dueIn30.map(r => (
+                  <span key={r.id} style={{display:'inline-flex',alignItems:'center',gap:5,background:'rgba(0,0,0,.05)',borderRadius:12,padding:'2px 10px'}}>
+                    <span>{r.description}</span>
+                    <span style={{color:'#f57c00',fontWeight:700,fontSize:11}}>{fmtDate(r.next_due_date)}</span>
+                    <span style={{color:'#888',fontSize:10}}>BHD {parseFloat(r.total_amount).toFixed(3)}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* Due in 31–60 days row */}
+            {dueIn60.length > 0 && (
+              <div style={{background:'#f3f8ff',padding:'5px 12px',fontSize:12,color:'#37474f',display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
+                <span style={{fontWeight:700}}>📅 Due in 31–60 days</span>
+                {dueIn60.map(r => (
+                  <span key={r.id} style={{display:'inline-flex',alignItems:'center',gap:5,background:'rgba(0,0,0,.05)',borderRadius:12,padding:'2px 10px'}}>
+                    <span>{r.description}</span>
+                    <span style={{color:'#1565c0',fontSize:11}}>{fmtDate(r.next_due_date)}</span>
+                    <span style={{color:'#888',fontSize:10}}>BHD {parseFloat(r.total_amount).toFixed(3)}</span>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -402,10 +446,12 @@ function RecurringExpenseForm({ cats, editing, onClose, onSaved, onManageCats })
   const total = (parseFloat(form.net_amount||0)+parseFloat(form.vat_amount||0)).toFixed(3)
 
   const freqNote = {
-    weekly:    'Generates every 7 days',
-    monthly:   `Generates on day ${form.day_of_month} of each month`,
-    quarterly: `Generates on day ${form.day_of_month} every 3 months`,
-    yearly:    `Generates on day ${form.day_of_month} of the same month each year`,
+    weekly:      'Generates every 7 days',
+    monthly:     `Generates on day ${form.day_of_month} of each month`,
+    quarterly:   `Generates on day ${form.day_of_month} every 3 months`,
+    half_yearly: `Generates on day ${form.day_of_month} every 6 months`,
+    yearly:      `Generates on day ${form.day_of_month} of the same month each year`,
+    bi_annual:   `Generates on day ${form.day_of_month} every 2 years — use for visa/work permit renewals`,
   }[form.frequency]
 
   return (
@@ -443,8 +489,10 @@ function RecurringExpenseForm({ cats, editing, onClose, onSaved, onManageCats })
               <select value={form.frequency} onChange={e=>F('frequency',e.target.value)}>
                 <option value="weekly">Weekly</option>
                 <option value="monthly">Monthly</option>
-                <option value="quarterly">Quarterly</option>
+                <option value="quarterly">Quarterly (every 3 months)</option>
+                <option value="half_yearly">Half-Yearly (every 6 months)</option>
                 <option value="yearly">Yearly</option>
+                <option value="bi_annual">Every 2 Years (visa / permit renewals)</option>
               </select>
             </div>
           </div>

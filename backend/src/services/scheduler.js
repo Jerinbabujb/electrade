@@ -352,11 +352,13 @@ function advanceDate(frequency, dayOfMonth, fromDateStr) {
   const dom = Math.min(dayOfMonth || 1, 28)
   const d = new Date(fromDateStr)
   switch (frequency) {
-    case 'weekly':    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).toISOString().split('T')[0]
-    case 'monthly':   return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
-    case 'quarterly': return new Date(d.getFullYear(), d.getMonth() + 3,  dom).toISOString().split('T')[0]
-    case 'yearly':    return new Date(d.getFullYear() + 1, d.getMonth(), dom).toISOString().split('T')[0]
-    default:          return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
+    case 'weekly':      return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7).toISOString().split('T')[0]
+    case 'monthly':     return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
+    case 'quarterly':   return new Date(d.getFullYear(), d.getMonth() + 3,  dom).toISOString().split('T')[0]
+    case 'half_yearly': return new Date(d.getFullYear(), d.getMonth() + 6,  dom).toISOString().split('T')[0]
+    case 'yearly':      return new Date(d.getFullYear() + 1, d.getMonth(),  dom).toISOString().split('T')[0]
+    case 'bi_annual':   return new Date(d.getFullYear() + 2, d.getMonth(),  dom).toISOString().split('T')[0]
+    default:            return new Date(d.getFullYear(), d.getMonth() + 1,  dom).toISOString().split('T')[0]
   }
 }
 
