@@ -13,7 +13,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./backend/src/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL","pg_isready -U electrade"]
       interval: 10s
@@ -39,7 +39,7 @@ services:
       SMTP_USER:     ${SMTP_USER:-}
       SMTP_PASS:     ${SMTP_PASS:-}
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001"
     volumes:
       - backups:/app/backups
 
@@ -48,7 +48,7 @@ services:
     container_name: electrade_web
     restart: unless-stopped
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
       - api
 
