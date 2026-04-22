@@ -113,7 +113,7 @@ export default function AppShell() {
           fontSize: 9, fontWeight: 900, color: 'var(--blue)', flexShrink: 0,
         }}>E</div>
         <span style={{ color: '#fff', fontSize: 12, fontWeight: 600 }}>
-          ElecTrade Pro — {co.name || 'Al Manama Electrical Trading Co. W.L.L'}
+          ElecTrade Pro
           &nbsp;|&nbsp; VAT: {co.vat_number || 'BH-VAT-20241234'}
           &nbsp;|&nbsp; CR: {co.cr_number || '98765-1'}
         </span>
@@ -153,7 +153,7 @@ export default function AppShell() {
         }}>
           <div style={{ padding: '10px', borderBottom: '1px solid #444', background: '#222', textAlign: 'center' }}>
             <div style={{ color: '#fff', fontSize: 11, fontWeight: 700, lineHeight: 1.4 }}>
-              {co.name || 'Al Manama Electrical Trading Co. W.L.L'}
+              {co.name}
             </div>
             {co.logo && (
               <img
