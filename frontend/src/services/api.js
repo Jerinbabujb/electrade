@@ -146,11 +146,14 @@ export const recurringExpenseApi = {
 
 // ── Bank ───────────────────────────────────────
 export const bankApi = {
-  accounts:    ()        => api.get('/bank/accounts'),
-  transactions:(id, p)   => api.get(`/bank/accounts/${id}/transactions`, { params: p }),
-  import:      (id, f)   => api.post(`/bank/accounts/${id}/import`, f),
-  autoMatch:   (id)      => api.post(`/bank/accounts/${id}/auto-match`),
-  manualMatch: (txId, d) => api.put(`/bank/transactions/${txId}/match`, d),
+  accounts:       ()           => api.get('/bank/accounts'),
+  createAccount:  (data)       => api.post('/bank/accounts', data),
+  updateAccount:  (id, data)   => api.put(`/bank/accounts/${id}`, data),
+  deleteAccount:  (id)         => api.delete(`/bank/accounts/${id}`),
+  transactions:   (id, p)      => api.get(`/bank/accounts/${id}/transactions`, { params: p }),
+  import:         (id, f)      => api.post(`/bank/accounts/${id}/import`, f),
+  autoMatch:      (id)         => api.post(`/bank/accounts/${id}/auto-match`),
+  manualMatch:    (txId, d)    => api.put(`/bank/transactions/${txId}/match`, d),
 }
 
 // ── Reports ────────────────────────────────────

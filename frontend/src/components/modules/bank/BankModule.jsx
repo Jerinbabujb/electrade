@@ -10,11 +10,23 @@ export default function BankModule() {
   const [dates, setDates] = useState({ from:'', to:'' })
   const [showImport, setShowImport] = useState(false)
   const [matchingTx, setMatchingTx] = useState(null)
+  const [showAcctForm, setShowAcctForm] = useState(false)
+  const [editingAcct, setEditingAcct] = useState(null)
 
   const { data: accsData } = useQuery({ queryKey:['bank-accounts'], queryFn:()=>bankApi.accounts().then(r=>r.data.data) })
   const accounts = accsData || []
   const selAcc = accounts[0]
   const activeId = accountId || selAcc?.id
+
+  const deleteAcctMut = useMutation({
+    mutationFn: (id) => bankApi.deleteAccount(id),
+    onSuccess: (r) => {
+      toast.success(r.data.message)
+      setAccountId(null)
+      qc.invalidateQueries(['bank-accounts'])
+    },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Failed'),
+  })
 
   const { data: txData, isLoading } = useQuery({
     queryKey: ['bank-txns', activeId, dates],
@@ -68,9 +80,18 @@ export default function BankModule() {
     <div style={{display:'flex',flexDirection:'column',flex:1,overflow:'hidden'}}>
       <div className="module-title">Bank Reconciliation</div>
       <div className="toolbar">
-        <select className="btn" style={{height:26,cursor:'default'}} value={activeId||''} onChange={e=>setAccountId(e.target.value)}>
-          {accounts.map(a=><option key={a.id} value={a.id}>{a.bank_name} — {a.iban||a.account_number}</option>)}
-        </select>
+        {accounts.length > 0 ? (
+          <select className="btn" style={{height:26,cursor:'default'}} value={activeId||''} onChange={e=>setAccountId(e.target.value)}>
+            {accounts.map(a=><option key={a.id} value={a.id}>{a.bank_name} — {a.iban||a.account_number||a.account_name}</option>)}
+          </select>
+        ) : (
+          <span style={{fontSize:12,color:'#888',padding:'0 4px'}}>No bank accounts</span>
+        )}
+        <button className="btn" onClick={()=>{ setEditingAcct(null); setShowAcctForm(true) }}>＋ Add Account</button>
+        {activeId && <>
+          <button className="btn" style={{fontSize:11}} onClick={()=>{ setEditingAcct(accounts.find(a=>a.id===activeId)); setShowAcctForm(true) }}>✏ Edit</button>
+          <button className="btn danger" style={{fontSize:11}} onClick={()=>{ if(window.confirm('Remove this bank account?')) deleteAcctMut.mutate(activeId) }}>🗑</button>
+        </>}
         <div className="toolbar-sep"/>
         <div style={{display:'flex',alignItems:'center',gap:4,fontSize:12}}>
           <span style={{color:'#666'}}>From:</span>
@@ -111,7 +132,10 @@ export default function BankModule() {
           </tr></thead>
           <tbody>
             {isLoading && <tr className="empty-row"><td colSpan={7}>Loading transactions...</td></tr>}
-            {!isLoading && !txns.length && <tr className="empty-row"><td colSpan={7}>No transactions. Import a bank statement to begin reconciliation.</td></tr>}
+            {!isLoading && !activeId && <tr className="empty-row"><td colSpan={7}>
+        No bank accounts set up. Click <strong>＋ Add Account</strong> in the toolbar to add your first bank account.
+      </td></tr>}
+      {!isLoading && activeId && !txns.length && <tr className="empty-row"><td colSpan={7}>No transactions. Import a bank statement to begin reconciliation.</td></tr>}
             {txns.map(t => (
               <tr key={t.id} style={{background:t.match_status==='unmatched'?'#fff8f0':'#fff'}}>
                 <td>{fmtDate(t.transaction_date)}</td>
@@ -156,6 +180,18 @@ export default function BankModule() {
         <span style={{color:unmatched.length?'#c62828':'#2e7d32'}}>Unmatched: {unmatched.length}</span>
       </div>
 
+      {showAcctForm && (
+        <BankAccountForm
+          editing={editingAcct}
+          onClose={()=>{ setShowAcctForm(false); setEditingAcct(null) }}
+          onSaved={(id)=>{
+            qc.invalidateQueries(['bank-accounts'])
+            if (id) setAccountId(id)
+            setShowAcctForm(false); setEditingAcct(null)
+          }}
+        />
+      )}
+
       {showImport && activeId && (
         <ImportModal
           accountId={activeId}
@@ -171,6 +207,94 @@ export default function BankModule() {
           onDone={()=>{ qc.invalidateQueries(['bank-txns']); setMatchingTx(null) }}
         />
       )}
+    </div>
+  )
+}
+
+// ── Bank Account Form ──────────────────────────────────────
+function BankAccountForm({ editing, onClose, onSaved }) {
+  const empty = { bank_name:'', account_name:'', account_number:'', iban:'', currency:'BHD', current_balance:'0' }
+  const [form, setForm] = useState(editing ? {
+    bank_name:       editing.bank_name       || '',
+    account_name:    editing.account_name    || '',
+    account_number:  editing.account_number  || '',
+    iban:            editing.iban            || '',
+    currency:        editing.currency        || 'BHD',
+    current_balance: editing.current_balance || '0',
+  } : empty)
+  const F = (k,v) => setForm(f=>({...f,[k]:v}))
+
+  const saveMut = useMutation({
+    mutationFn: () => editing
+      ? bankApi.updateAccount(editing.id, form)
+      : bankApi.createAccount(form),
+    onSuccess: (r) => {
+      toast.success(editing ? 'Account updated' : 'Bank account added')
+      onSaved(editing ? editing.id : r.data.data.id)
+    },
+    onError: (e) => toast.error(e.response?.data?.error?.message || 'Save failed'),
+  })
+
+  return (
+    <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal modal-sm">
+        <div className="modal-header">
+          <h3>{editing ? '✏ Edit Bank Account' : '🏦 Add Bank Account'}</h3>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+        <div className="modal-toolbar">
+          <button className="btn primary" onClick={()=>saveMut.mutate()}
+            disabled={saveMut.isPending||!form.bank_name||!form.account_name}>
+            💾 {saveMut.isPending ? 'Saving...' : 'Save'}
+          </button>
+          <button className="btn" onClick={onClose}>✕ Cancel</button>
+        </div>
+        <div className="modal-body" style={{padding:12}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+            <div className="field">
+              <label>Bank Name *</label>
+              <input value={form.bank_name} onChange={e=>F('bank_name',e.target.value)}
+                placeholder="e.g. NBB, BBK, Ahli United" autoFocus/>
+            </div>
+            <div className="field">
+              <label>Account Name *</label>
+              <input value={form.account_name} onChange={e=>F('account_name',e.target.value)}
+                placeholder="e.g. Al Manama Electrical Trading"/>
+            </div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+            <div className="field">
+              <label>Account Number</label>
+              <input value={form.account_number} onChange={e=>F('account_number',e.target.value)}
+                placeholder="e.g. 12345678"/>
+            </div>
+            <div className="field">
+              <label>IBAN</label>
+              <input value={form.iban} onChange={e=>F('iban',e.target.value)}
+                placeholder="e.g. BH29NBOB99999999999999"/>
+            </div>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <div className="field">
+              <label>Currency</label>
+              <select value={form.currency} onChange={e=>F('currency',e.target.value)}>
+                <option value="BHD">BHD — Bahraini Dinar</option>
+                <option value="USD">USD — US Dollar</option>
+                <option value="EUR">EUR — Euro</option>
+                <option value="GBP">GBP — British Pound</option>
+                <option value="AED">AED — UAE Dirham</option>
+                <option value="SAR">SAR — Saudi Riyal</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>Opening Balance</label>
+              <input type="number" step="0.001" value={form.current_balance}
+                onChange={e=>F('current_balance',e.target.value)} placeholder="0.000"/>
+              <span style={{fontSize:10,color:'#888',marginTop:2}}>Current balance as of today</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

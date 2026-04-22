@@ -930,8 +930,46 @@ module.exports.bankRouter = (() => {
 
   r.get('/accounts', async (req, res, next) => {
     try {
-      const { rows } = await db.query(`SELECT * FROM bank_accounts WHERE company_id=$1 AND is_active=true`, [req.user.company_id])
+      const { rows } = await db.query(`SELECT * FROM bank_accounts WHERE company_id=$1 AND is_active=true ORDER BY created_at ASC`, [req.user.company_id])
       res.json({ data: rows })
+    } catch (err) { next(err) }
+  })
+
+  r.post('/accounts', async (req, res, next) => {
+    try {
+      const { bank_name, account_name, account_number, iban, currency, current_balance } = req.body
+      if (!bank_name || !account_name) return res.status(400).json({ error: { message: 'bank_name and account_name are required' } })
+      const { rows: [row] } = await db.query(
+        `INSERT INTO bank_accounts (company_id, bank_name, account_name, account_number, iban, currency, current_balance)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        [req.user.company_id, bank_name, account_name, account_number||null, iban||null,
+         currency||'BHD', parseFloat(current_balance||0)])
+      res.status(201).json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.put('/accounts/:id', async (req, res, next) => {
+    try {
+      const { bank_name, account_name, account_number, iban, currency, current_balance } = req.body
+      const { rows: [row] } = await db.query(
+        `UPDATE bank_accounts SET bank_name=$1, account_name=$2, account_number=$3, iban=$4,
+           currency=$5, current_balance=$6
+         WHERE id=$7 AND company_id=$8 RETURNING *`,
+        [bank_name, account_name, account_number||null, iban||null,
+         currency||'BHD', parseFloat(current_balance||0),
+         req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Account not found' } })
+      res.json({ data: row })
+    } catch (err) { next(err) }
+  })
+
+  r.delete('/accounts/:id', async (req, res, next) => {
+    try {
+      const { rows: [row] } = await db.query(
+        `UPDATE bank_accounts SET is_active=false WHERE id=$1 AND company_id=$2 RETURNING bank_name`,
+        [req.params.id, req.user.company_id])
+      if (!row) return res.status(404).json({ error: { message: 'Account not found' } })
+      res.json({ message: `"${row.bank_name}" removed` })
     } catch (err) { next(err) }
   })
 
