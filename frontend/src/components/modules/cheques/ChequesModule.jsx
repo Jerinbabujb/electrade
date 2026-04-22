@@ -245,6 +245,13 @@ export default function ChequesModule() {
         <button className="btn" style={{background:'#e8f5e9',borderColor:'#a5d6a7',color:'#2e7d32'}} onClick={()=>{ setForm({...empty,direction:'received'}); setShowForm(true) }}>＋ Received Cheque</button>
         <button className="btn" style={{background:'#e8eaf6',borderColor:'#9fa8da',color:'#283593'}} onClick={()=>setShowImport(true)}>📥 Import Excel</button>
         <div className="toolbar-sep"/>
+        <a className="btn" style={{textDecoration:'none',opacity:selectedId?1:.4,pointerEvents:selectedId?'auto':'none'}}
+          href={selectedId ? chequeApi.voucherUrl(selectedId) : '#'} target="_blank" rel="noreferrer"
+          title="Print Payment Voucher (A4)">🖨 Voucher</a>
+        <a className="btn" style={{textDecoration:'none',opacity:(selectedId&&sel?.direction==='issued')?1:.4,pointerEvents:(selectedId&&sel?.direction==='issued')?'auto':'none'}}
+          href={(selectedId&&sel?.direction==='issued') ? chequeApi.printChequeUrl(selectedId,'nbb') : '#'} target="_blank" rel="noreferrer"
+          title="Print on NBB cheque paper">🖨 NBB Cheque</a>
+        <div className="toolbar-sep"/>
         <button className="btn" style={{background:'#e8f5e9',borderColor:'#a5d6a7',color:'#2e7d32'}}
           disabled={!selectedId || sel?.status!=='pending'}
           onClick={()=>selectedId && statusMut.mutate({id:selectedId, status:'cleared'})}>✓ Mark Cleared</button>
@@ -286,10 +293,11 @@ export default function ChequesModule() {
             <th>Direction</th><th>Cheque No.</th><th>Bank</th>
             <th>Party</th><th>Issue Date</th><th>Cheque Date</th>
             <th className="right">Amount BHD</th><th>Status</th><th>Notes</th>
+            <th style={{width:90}}>Print</th>
           </tr></thead>
           <tbody>
-            {isLoading && <tr className="empty-row"><td colSpan={10}>Loading...</td></tr>}
-            {!isLoading && !rows.length && <tr className="empty-row"><td colSpan={10}>No cheques found</td></tr>}
+            {isLoading && <tr className="empty-row"><td colSpan={11}>Loading...</td></tr>}
+            {!isLoading && !rows.length && <tr className="empty-row"><td colSpan={11}>No cheques found</td></tr>}
             {rows.map(r => {
               const sc = STATUS_COLORS[r.status] || STATUS_COLORS.pending
               const isOverdue = r.status==='pending' && new Date(r.cheque_date) <= new Date()
@@ -314,6 +322,18 @@ export default function ChequesModule() {
                   <td className="right" style={{fontWeight:700}}>{fmtBhd(r.amount)}</td>
                   <td><span style={{fontSize:11,padding:'2px 7px',borderRadius:10,background:sc.bg,color:sc.color,fontWeight:600}}>{sc.label}</span></td>
                   <td style={{fontSize:11,color:'#888',maxWidth:150,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.notes||'—'}</td>
+                  <td onClick={e=>e.stopPropagation()} style={{whiteSpace:'nowrap'}}>
+                    <a href={chequeApi.voucherUrl(r.id)} target="_blank" rel="noreferrer"
+                      style={{fontSize:10,padding:'2px 6px',borderRadius:3,background:'#e3f2fd',color:'#1565c0',
+                              fontWeight:600,textDecoration:'none',marginRight:3}}
+                      title="Payment Voucher">V</a>
+                    {r.direction === 'issued' && (
+                      <a href={chequeApi.printChequeUrl(r.id,'nbb')} target="_blank" rel="noreferrer"
+                        style={{fontSize:10,padding:'2px 6px',borderRadius:3,background:'#e8f5e9',color:'#2e7d32',
+                                fontWeight:600,textDecoration:'none'}}
+                        title="Print NBB Cheque">NBB</a>
+                    )}
+                  </td>
                 </tr>
               )
             })}

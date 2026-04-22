@@ -194,7 +194,9 @@ export const chequeApi = {
   delete:    (id)         => api.delete(`/cheques/${id}`),
   preview:   (file)       => { const fd = new FormData(); fd.append('file', file); return api.post('/cheques/import?preview=1', fd) },
   import:    (file)       => { const fd = new FormData(); fd.append('file', file); return api.post('/cheques/import', fd) },
-  templateUrl: ()         => `/api/v1/cheques/import-template?token=${localStorage.getItem('et_token')}`,
+  templateUrl:    ()     => `/api/v1/cheques/import-template?token=${localStorage.getItem('et_token')}`,
+  voucherUrl:     (id)  => `/api/v1/cheques/${id}/voucher?token=${localStorage.getItem('et_token')}`,
+  printChequeUrl: (id, bank='nbb') => `/api/v1/cheques/${id}/print-cheque?bank=${bank}&token=${localStorage.getItem('et_token')}`,
 }
 
 // ── HR ─────────────────────────────────────────

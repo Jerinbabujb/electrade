@@ -634,3 +634,285 @@ exports.generateStatementPdf = (data) => htmlToPdf(statementHtml(data))
 exports.invoicePrintHtml   = (inv)  => Buffer.from(invoiceHtml(inv,       { forPrint: true }))
 exports.dnPrintHtml        = (dn)   => Buffer.from(dnHtml(dn,             { forPrint: true }))
 exports.statementPrintHtml = (data) => Buffer.from(statementHtml(data,    { forPrint: true }))
+
+// ─────────────────────────────────────────────
+//  SHARED — Amount to words (BHD / Fils)
+// ─────────────────────────────────────────────
+function amountToWordsBhd(amount) {
+  const n      = Math.round(parseFloat(amount || 0) * 1000) // work in Fils to avoid float issues
+  const dinars = Math.floor(n / 1000)
+  const fils   = n % 1000
+
+  const ones = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine',
+                 'Ten','Eleven','Twelve','Thirteen','Fourteen','Fifteen','Sixteen',
+                 'Seventeen','Eighteen','Nineteen']
+  const tens = ['','','Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety']
+
+  function sayBelow100(n) {
+    if (n < 20) return ones[n]
+    return tens[Math.floor(n / 10)] + (n % 10 ? ' ' + ones[n % 10] : '')
+  }
+  function sayBelow1000(n) {
+    if (n < 100) return sayBelow100(n)
+    const h = Math.floor(n / 100)
+    const r = n % 100
+    return ones[h] + ' Hundred' + (r ? ' and ' + sayBelow100(r) : '')
+  }
+  function sayNumber(n) {
+    if (n === 0) return 'Zero'
+    let out = ''
+    if (n >= 1000000) { out += sayBelow1000(Math.floor(n / 1000000)) + ' Million '; n %= 1000000 }
+    if (n >= 1000)    { out += sayBelow1000(Math.floor(n / 1000))    + ' Thousand '; n %= 1000 }
+    if (n > 0)        { out += sayBelow1000(n) }
+    return out.trim()
+  }
+
+  let words = sayNumber(dinars) + (dinars === 1 ? ' Dinar' : ' Dinars')
+  if (fils > 0) words += ' and ' + sayNumber(fils) + (fils === 1 ? ' Fils' : ' Fils')
+  return words + ' Only'
+}
+exports.amountToWordsBhd = amountToWordsBhd
+
+// ─────────────────────────────────────────────
+//  CHEQUE PAYMENT VOUCHER  (Option A — A4)
+// ─────────────────────────────────────────────
+function chequeVoucherHtml(cheque, co) {
+  const brand    = (co.theme_color && /^#[0-9a-fA-F]{6}$/.test(co.theme_color)) ? co.theme_color : '#1a5fa8'
+  const amount   = parseFloat(cheque.amount || 0)
+  const words    = amountToWordsBhd(amount)
+  const logoImg  = co.logo ? `<img src="${co.logo}" alt="" style="height:52px;max-width:130px;object-fit:contain">` : ''
+  const voucherNo = cheque.cheque_no ? `CHQ-${cheque.cheque_no}` : ''
+
+  const row = (label, value, bold) => `
+    <tr>
+      <td style="width:160px;padding:7px 10px;font-size:11px;color:#555;font-weight:600;background:#f8f8f8;border:1px solid #e0e0e0">${label}</td>
+      <td style="padding:7px 12px;font-size:11px;color:#222;border:1px solid #e0e0e0;${bold?'font-weight:700;':''}">${value}</td>
+    </tr>`
+
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Payment Voucher — ${esc(voucherNo)}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#222;background:#fff;padding:24px}
+  @media print{body{padding:0}@page{size:A4;margin:14mm}}
+</style></head><body>
+
+<!-- Letterhead -->
+<div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid ${brand};padding-bottom:12px;margin-bottom:18px">
+  <div style="display:flex;gap:14px;align-items:center">
+    ${logoImg}
+    <div>
+      <div style="font-size:15px;font-weight:700;color:${brand}">${esc(co.name || '')}</div>
+      ${co.name_ar ? `<div style="font-size:12px;color:#555;direction:rtl">${esc(co.name_ar)}</div>` : ''}
+      <div style="font-size:10px;color:#555;margin-top:3px">${[co.address,co.tel,co.email].filter(Boolean).map(esc).join(' · ')}</div>
+      <div style="font-size:10px;color:#555">${co.vat_number?`VAT: ${esc(co.vat_number)}`:''}${co.cr_number?` · CR: ${esc(co.cr_number)}`:''}</div>
+    </div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:20px;font-weight:700;color:#333;letter-spacing:-.5px">PAYMENT VOUCHER</div>
+    ${voucherNo ? `<div style="font-size:12px;color:#555;margin-top:4px">Ref: <strong>${esc(voucherNo)}</strong></div>` : ''}
+    <div style="font-size:11px;color:#555;margin-top:3px">Date: <strong>${fmtDate(cheque.issue_date || new Date())}</strong></div>
+  </div>
+</div>
+
+<!-- Amount highlight -->
+<div style="background:${brand};color:#fff;padding:12px 20px;border-radius:5px;display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+  <div style="font-size:13px;font-weight:600">Amount Paid</div>
+  <div style="font-size:22px;font-weight:700;letter-spacing:-.5px">BHD ${amount.toFixed(3)}</div>
+</div>
+
+<!-- Details table -->
+<table style="width:100%;border-collapse:collapse;margin-bottom:18px">
+  ${row('Pay To',          esc(cheque.party_name || '—'), true)}
+  ${row('Amount (Words)',  esc(words), true)}
+  ${row('Payment Method', 'Cheque', false)}
+  ${row('Bank',           esc(cheque.bank_name || '—'), false)}
+  ${row('Cheque No.',     esc(cheque.cheque_no || '—'), false)}
+  ${row('Cheque Date',    fmtDate(cheque.cheque_date), false)}
+  ${cheque.invoice_no  ? row('Invoice Ref',  esc(cheque.invoice_no),  false) : ''}
+  ${cheque.purchase_no ? row('Purchase Ref', esc(cheque.purchase_no), false) : ''}
+  ${cheque.notes       ? row('Notes',        esc(cheque.notes),       false) : ''}
+</table>
+
+<!-- Signature boxes -->
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:24px">
+  ${['Prepared By','Authorized By','Received By'].map(lbl => `
+  <div style="border:1px solid #ccc;border-radius:4px;padding:12px">
+    <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:#555;margin-bottom:32px">${lbl}</div>
+    <div style="border-top:1px solid #bbb;padding-top:5px;font-size:9px;color:#777">Name &amp; Signature</div>
+  </div>`).join('')}
+</div>
+
+<!-- Footer -->
+<div style="margin-top:20px;border-top:1px solid #ddd;padding-top:8px;font-size:9.5px;color:#555;display:flex;justify-content:space-between">
+  <span>${esc(co.name || '')}${co.vat_number?` · VAT: ${esc(co.vat_number)}`:''}</span>
+  <span>Computer generated voucher · ${new Date().toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'})}</span>
+</div>
+
+${printControls(brand)}
+</body></html>`
+}
+
+// ─────────────────────────────────────────────
+//  NBB CHEQUE PRINT  (Option B)
+//  Calibrated for National Bank of Bahrain
+//  Standard cheque: 187 mm × 84 mm (landscape)
+//
+//  ⚠  Positions are approximate. If fields are
+//     misaligned, adjust the mm values in the
+//     FIELD POSITIONS section below.
+// ─────────────────────────────────────────────
+function chequeNbbHtml(cheque, co) {
+  const amount = parseFloat(cheque.amount || 0)
+  const words  = amountToWordsBhd(amount)
+
+  // Parse cheque date
+  const dt = cheque.cheque_date ? new Date(cheque.cheque_date) : new Date()
+  const dd  = String(dt.getDate()).padStart(2, '0')
+  const mm  = String(dt.getMonth() + 1).padStart(2, '0')
+  const yyyy = String(dt.getFullYear())
+
+  // ── FIELD POSITIONS (mm from top-left of cheque) ──────────
+  // Adjust these to match your physical NBB cheque:
+  const POS = {
+    chequeW:    187,   // cheque width  (mm)
+    chequeH:     84,   // cheque height (mm)
+
+    payee_x:     28,   // "Pay" line — left edge of payee name
+    payee_y:     31,   // "Pay" line — top
+    payee_w:    110,   // max width for payee name
+
+    words_x:     10,   // amount-in-words line left
+    words_y:     42,   // amount-in-words line top
+    words_w:    150,   // max width
+
+    amt_x:      158,   // amount figures box left
+    amt_y:       27,   // amount figures box top
+    amt_w:       24,   // box width
+
+    date_dd_x:  147,   // day box centre-x
+    date_mm_x:  158,   // month box centre-x
+    date_yy_x:  169,   // year (last 2 digits) centre-x
+    date_y:      16,   // date row top
+  }
+  // ─────────────────────────────────────────────────────────
+
+  const f = (v) => `${v}mm`
+
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Cheque Print — ${esc(cheque.cheque_no || '')}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#fff;font-family:Arial,sans-serif}
+
+  /* Screen preview wrapper */
+  .preview-wrap{
+    display:flex;flex-direction:column;align-items:center;
+    padding:20px;background:#e8e8e8;min-height:100vh
+  }
+  .hint{
+    background:#fff3cd;border:1px solid #ffc107;border-radius:4px;
+    padding:8px 14px;font-size:11px;color:#5d4037;margin-bottom:12px;
+    max-width:${POS.chequeW}mm;width:100%
+  }
+
+  /* The cheque itself — exact physical size */
+  .cheque{
+    width:${f(POS.chequeW)};height:${f(POS.chequeH)};
+    position:relative;background:transparent;
+    border:1px dashed #aaa; /* remove this line for actual printing */
+  }
+
+  .field{
+    position:absolute;
+    font-family:Arial,sans-serif;
+    overflow:hidden;white-space:nowrap;
+  }
+  .field-payee{
+    left:${f(POS.payee_x)};top:${f(POS.payee_y)};width:${f(POS.payee_w)};
+    font-size:11pt;font-weight:700;color:#000;
+    border-bottom:1px solid #000; /* underline to fill line */
+    padding-bottom:1mm;
+  }
+  .field-words{
+    left:${f(POS.words_x)};top:${f(POS.words_y)};width:${f(POS.words_w)};
+    font-size:9pt;color:#000;
+    white-space:normal;line-height:1.3;
+  }
+  .field-amount{
+    left:${f(POS.amt_x)};top:${f(POS.amt_y)};width:${f(POS.amt_w)};
+    font-size:11pt;font-weight:700;color:#000;text-align:right;
+    letter-spacing:.5px;
+  }
+  .field-dd{
+    left:${f(POS.date_dd_x)};top:${f(POS.date_y)};width:9mm;
+    font-size:10pt;font-weight:700;text-align:center;color:#000;
+  }
+  .field-mm{
+    left:${f(POS.date_mm_x)};top:${f(POS.date_y)};width:9mm;
+    font-size:10pt;font-weight:700;text-align:center;color:#000;
+  }
+  .field-yy{
+    left:${f(POS.date_yy_x)};top:${f(POS.date_y)};width:18mm;
+    font-size:10pt;font-weight:700;text-align:center;color:#000;
+  }
+
+  /* Screen-only controls */
+  .controls{
+    display:flex;gap:10px;margin-bottom:10px;max-width:${POS.chequeW}mm;width:100%
+  }
+  .btn-print{
+    padding:7px 18px;background:#1a5fa8;color:#fff;border:none;
+    border-radius:4px;cursor:pointer;font-size:12px;font-weight:600
+  }
+  .btn-close{
+    padding:7px 14px;background:#eee;color:#333;border:none;
+    border-radius:4px;cursor:pointer;font-size:12px
+  }
+
+  /* Print rules — hide everything except the cheque fields */
+  @media print {
+    @page {
+      size: ${POS.chequeW}mm ${POS.chequeH}mm;
+      margin: 0;
+    }
+    body { background: transparent; }
+    .preview-wrap { background:transparent; padding:0; }
+    .controls, .hint { display: none; }
+    .cheque { border: none; }
+  }
+</style></head><body>
+<div class="preview-wrap">
+  <div class="controls">
+    <button class="btn-print" onclick="window.print()">🖨 Print Cheque</button>
+    <button class="btn-close" onclick="window.close()">✕ Close</button>
+  </div>
+  <div class="hint">
+    ⚠ <strong>Screen preview only</strong> — the dashed border will not print.
+    Load your <strong>NBB cheque</strong> into the printer, select the correct paper size
+    (<strong>${POS.chequeW} × ${POS.chequeH} mm</strong>), and disable all scaling / fit-to-page options.
+    Print one test sheet on plain paper first to verify alignment.
+  </div>
+
+  <!-- Cheque physical area -->
+  <div class="cheque">
+    <!-- Payee -->
+    <div class="field field-payee">${esc(cheque.party_name || '')}</div>
+
+    <!-- Amount in words -->
+    <div class="field field-words">${esc(words)}</div>
+
+    <!-- Amount figures -->
+    <div class="field field-amount">${amount.toFixed(3)}</div>
+
+    <!-- Date — DD / MM / YYYY -->
+    <div class="field field-dd">${dd}</div>
+    <div class="field field-mm">${mm}</div>
+    <div class="field field-yy">${yyyy}</div>
+  </div>
+</div>
+</body></html>`
+}
+
+exports.chequeVoucherHtml = (cheque, co) => Buffer.from(chequeVoucherHtml(cheque, co))
+exports.chequeNbbHtml     = (cheque, co) => Buffer.from(chequeNbbHtml(cheque, co))

@@ -1,9 +1,10 @@
-const router = require('express').Router();
-const db     = require('../db');
+const router  = require('express').Router();
+const db      = require('../db');
 const { v4: uuid } = require('uuid');
 const { authenticate, authorize } = require('../middleware/auth');
-const multer = require('multer');
-const XLSX   = require('xlsx');
+const multer  = require('multer');
+const XLSX    = require('xlsx');
+const pdfSvc  = require('../services/pdfService');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -423,5 +424,58 @@ router.post('/import', authenticate, authorize('admin', 'accountant'),
     res.json({ data: { imported: valid.length, skipped_errors: errors.length, skipped_duplicates: dupes.length } })
   } catch (err) { next(err) }
 })
+
+// ── Single cheque fetch (for print routes) ────────────────────
+async function fetchChequeWithCompany(id, co_id) {
+  const { rows } = await db.query(`
+    SELECT ch.*,
+           i.invoice_no,
+           pu.purchase_no,
+           co.name, co.name_ar, co.address, co.tel, co.email,
+           co.vat_number, co.cr_number, co.logo, co.theme_color,
+           co.bank_name AS co_bank_name, co.bank_iban, co.bank_acct_name
+    FROM cheques ch
+    LEFT JOIN invoices  i  ON i.id  = ch.invoice_id
+    LEFT JOIN purchases pu ON pu.id = ch.purchase_id
+    JOIN companies co ON co.id = ch.company_id
+    WHERE ch.id = $1 AND ch.company_id = $2`, [id, co_id]);
+  if (!rows[0]) return null;
+  const r  = rows[0];
+  const co = {
+    name: r.name, name_ar: r.name_ar, address: r.address, tel: r.tel,
+    email: r.email, vat_number: r.vat_number, cr_number: r.cr_number,
+    logo: r.logo, theme_color: r.theme_color,
+    bank_name: r.co_bank_name, bank_iban: r.bank_iban, bank_acct_name: r.bank_acct_name,
+  };
+  return { ...r, invoice_no: r.invoice_no, purchase_no: r.purchase_no, company: co };
+}
+
+// GET /cheques/:id/voucher  — Payment Voucher (A4, browser print)
+router.get('/:id/voucher', authenticate, async (req, res, next) => {
+  try {
+    const cheque = await fetchChequeWithCompany(req.params.id, req.user.company_id);
+    if (!cheque) return res.status(404).json({ error: { message: 'Cheque not found' } });
+    const html = pdfSvc.chequeVoucherHtml(cheque, cheque.company);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) { next(err); }
+});
+
+// GET /cheques/:id/print-cheque?bank=nbb  — Cheque paper print
+router.get('/:id/print-cheque', authenticate, async (req, res, next) => {
+  try {
+    const bank   = (req.query.bank || 'nbb').toLowerCase();
+    const cheque = await fetchChequeWithCompany(req.params.id, req.user.company_id);
+    if (!cheque) return res.status(404).json({ error: { message: 'Cheque not found' } });
+    // Only issued cheques can be printed onto cheque paper
+    if (cheque.direction !== 'issued')
+      return res.status(400).json({ error: { message: 'Only issued cheques can be printed on cheque paper' } });
+    let html;
+    if (bank === 'nbb') html = pdfSvc.chequeNbbHtml(cheque, cheque.company);
+    else return res.status(400).json({ error: { message: `Bank template "${bank}" not supported yet` } });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) { next(err); }
+});
 
 module.exports = router;
