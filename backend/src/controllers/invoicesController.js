@@ -167,6 +167,34 @@ exports.create = async (req, res, next) => {
     // Quotations and proformas start as 'draft'; everything else starts as 'unpaid'
     const isDraft = ['quotation', 'proforma'].includes(type);
 
+    // Credit limit check — only for tax invoices, only when limit is set
+    if (type === 'tax_invoice' && customer_id && !req.body.force_credit) {
+      const { grand_total: newTotal } = calcTotals(items, invoice_discount, shipping);
+      const { rows: [cust] } = await db.query(
+        `SELECT c.credit_limit,
+                COALESCE(SUM(i.grand_total - i.amount_paid), 0) AS current_balance
+         FROM customers c
+         LEFT JOIN invoices i ON i.customer_id = c.id AND i.company_id = $1
+           AND i.payment_status IN ('unpaid','partial')
+         WHERE c.id = $2 AND c.company_id = $1
+         GROUP BY c.credit_limit`,
+        [req.user.company_id, customer_id])
+      if (cust && parseFloat(cust.credit_limit) > 0) {
+        const wouldExceed = parseFloat(cust.current_balance) + newTotal > parseFloat(cust.credit_limit)
+        if (wouldExceed) {
+          return res.status(422).json({
+            error: {
+              message: `Credit limit would be exceeded`,
+              code: 'CREDIT_LIMIT_EXCEEDED',
+              credit_limit: parseFloat(cust.credit_limit),
+              current_balance: parseFloat(cust.current_balance),
+              new_invoice_total: parseFloat(newTotal.toFixed(3)),
+            }
+          })
+        }
+      }
+    }
+
     const result = await db.withTransaction(async (client) => {
       const seqCol    = type === 'quotation' ? 'next_quotation_seq'
                       : type === 'proforma'  ? 'next_proforma_seq'

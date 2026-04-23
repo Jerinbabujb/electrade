@@ -4,6 +4,167 @@ import { chequeApi, reportApi, invoiceApi } from '../../../services/api'
 import { fmtBhd, fmtDate } from '../../../utils/format'
 import { useUIStore } from '../../../store'
 
+// ── VAT Return Panel ──────────────────────────────────────────
+function VatReturnPanel() {
+  const curYear = new Date().getFullYear()
+  const curQ    = Math.ceil((new Date().getMonth() + 1) / 3)
+  const [quarter, setQuarter] = useState(`Q${curQ}-${curYear}`)
+  const [expanded, setExpanded] = useState(null)
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ['vat-report', quarter],
+    queryFn:  () => reportApi.vat({ quarter }).then(r => r.data.data),
+    enabled:  !!quarter,
+  })
+
+  const quarters = []
+  for (let y = curYear; y >= curYear - 2; y--) {
+    for (let q = 4; q >= 1; q--) {
+      if (y === curYear && q > curQ) continue
+      quarters.push(`Q${q}-${y}`)
+    }
+  }
+
+  const Row = ({ label, value, sub, color }) => (
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'6px 0',borderBottom:'1px solid #f0f0f0'}}>
+      <span style={{fontSize:12,color:'#555'}}>{label}</span>
+      <div style={{textAlign:'right'}}>
+        <span style={{fontSize:14,fontWeight:700,color:color||'#333'}}>BHD {fmtBhd(value||0)}</span>
+        {sub && <div style={{fontSize:10,color:'#aaa'}}>{sub}</div>}
+      </div>
+    </div>
+  )
+
+  return (
+    <div style={{padding:'0 12px 12px'}}>
+      <div style={{background:'#fff',border:'1px solid #d0d0d0',borderRadius:3,padding:14}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,paddingBottom:8,borderBottom:'1px solid #eee'}}>
+          <div style={{fontWeight:700,fontSize:13,color:'#333'}}>VAT Return</div>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            <span style={{fontSize:11,color:'#888'}}>Quarter:</span>
+            <select value={quarter} onChange={e=>setQuarter(e.target.value)}
+              style={{fontSize:12,padding:'2px 6px',border:'1px solid #ccc',borderRadius:3,height:26}}>
+              {quarters.map(q=><option key={q} value={q}>{q}</option>)}
+            </select>
+            {isFetching && <span style={{fontSize:11,color:'#aaa'}}>Loading…</span>}
+          </div>
+        </div>
+
+        {data && (
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:12}}>
+            {/* Summary */}
+            <div style={{background:'#f9f9f9',border:'1px solid #eee',borderRadius:3,padding:12}}>
+              <div style={{fontSize:11,fontWeight:700,color:'#888',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Summary</div>
+              <Row label="Output VAT (Sales)" value={data.output_vat?.total_vat} color="#c62828"/>
+              <Row label="Credit Notes VAT" value={data.credit_notes?.total_vat} sub="reduces output" color="#e65100"/>
+              <Row label="Input VAT (Purchases)" value={data.input_vat?.total_vat} color="#2e7d32"/>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'10px 0 4px',borderTop:'2px solid #333',marginTop:4}}>
+                <span style={{fontSize:13,fontWeight:700}}>Net VAT Payable</span>
+                <span style={{fontSize:18,fontWeight:700,color: parseFloat(data.summary?.net_vat||0)>0?'#c62828':'#2e7d32'}}>
+                  BHD {fmtBhd(data.summary?.net_vat||0)}
+                </span>
+              </div>
+              <div style={{fontSize:10,color:'#888',marginTop:4}}>
+                Period: {data.period?.from} – {data.period?.to}
+              </div>
+              <div style={{marginTop:8,padding:'6px 8px',background:'#fff8e1',border:'1px solid #ffe082',borderRadius:3,fontSize:11,color:'#5d4037'}}>
+                ⚠ NBR filing due within 30 days of quarter end.
+              </div>
+            </div>
+
+            {/* Output VAT detail */}
+            <div style={{background:'#fff',border:'1px solid #eee',borderRadius:3,padding:12}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                <div style={{fontSize:11,fontWeight:700,color:'#c62828',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                  Output VAT — {(data.output_vat?.rows||[]).length} invoices
+                </div>
+                <button style={{background:'none',border:'none',fontSize:11,color:'var(--blue)',cursor:'pointer'}}
+                  onClick={()=>setExpanded(expanded==='output'?null:'output')}>
+                  {expanded==='output'?'▲ Hide':'▼ Show'}
+                </button>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:6}}>
+                <span style={{color:'#555'}}>Taxable net</span>
+                <span style={{fontWeight:600}}>BHD {fmtBhd(data.output_vat?.total_net||0)}</span>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}>
+                <span style={{color:'#555'}}>VAT collected</span>
+                <span style={{fontWeight:700,color:'#c62828'}}>BHD {fmtBhd(data.output_vat?.total_vat||0)}</span>
+              </div>
+              {expanded==='output' && (
+                <div style={{marginTop:8,maxHeight:220,overflowY:'auto',border:'1px solid #e0e0e0',borderRadius:3}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:10}}>
+                    <thead><tr style={{background:'#f5f5f5',position:'sticky',top:0}}>
+                      <th style={{padding:'3px 6px',textAlign:'left'}}>Invoice</th>
+                      <th style={{padding:'3px 6px',textAlign:'left'}}>Customer</th>
+                      <th style={{padding:'3px 6px',textAlign:'right'}}>Net</th>
+                      <th style={{padding:'3px 6px',textAlign:'right'}}>VAT</th>
+                    </tr></thead>
+                    <tbody>
+                      {(data.output_vat?.rows||[]).map((r,i)=>(
+                        <tr key={i} style={{borderBottom:'1px solid #f5f5f5',background:i%2?'#fafafa':'#fff'}}>
+                          <td style={{padding:'3px 6px',color:'var(--blue)',fontWeight:600,whiteSpace:'nowrap'}}>{r.invoice_no}</td>
+                          <td style={{padding:'3px 6px',maxWidth:100,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.customer_name}</td>
+                          <td style={{padding:'3px 6px',textAlign:'right'}}>{fmtBhd(r.taxable_amount||r.net_amount)}</td>
+                          <td style={{padding:'3px 6px',textAlign:'right',fontWeight:600}}>{fmtBhd(r.vat_amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* Input VAT detail */}
+            <div style={{background:'#fff',border:'1px solid #eee',borderRadius:3,padding:12}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                <div style={{fontSize:11,fontWeight:700,color:'#2e7d32',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                  Input VAT — {(data.input_vat?.rows||[]).length} transactions
+                </div>
+                <button style={{background:'none',border:'none',fontSize:11,color:'var(--blue)',cursor:'pointer'}}
+                  onClick={()=>setExpanded(expanded==='input'?null:'input')}>
+                  {expanded==='input'?'▲ Hide':'▼ Show'}
+                </button>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:6}}>
+                <span style={{color:'#555'}}>Purchases &amp; expenses</span>
+                <span style={{fontWeight:600}}>{(data.input_vat?.rows||[]).length} items</span>
+              </div>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}>
+                <span style={{color:'#555'}}>VAT reclaimable</span>
+                <span style={{fontWeight:700,color:'#2e7d32'}}>BHD {fmtBhd(data.input_vat?.total_vat||0)}</span>
+              </div>
+              {expanded==='input' && (
+                <div style={{marginTop:8,maxHeight:220,overflowY:'auto',border:'1px solid #e0e0e0',borderRadius:3}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:10}}>
+                    <thead><tr style={{background:'#f5f5f5',position:'sticky',top:0}}>
+                      <th style={{padding:'3px 6px',textAlign:'left'}}>Ref</th>
+                      <th style={{padding:'3px 6px',textAlign:'left'}}>Supplier</th>
+                      <th style={{padding:'3px 6px',textAlign:'right'}}>Net</th>
+                      <th style={{padding:'3px 6px',textAlign:'right'}}>VAT</th>
+                    </tr></thead>
+                    <tbody>
+                      {(data.input_vat?.rows||[]).map((r,i)=>(
+                        <tr key={i} style={{borderBottom:'1px solid #f5f5f5',background:i%2?'#fafafa':'#fff'}}>
+                          <td style={{padding:'3px 6px',color:'var(--blue)',fontWeight:600,whiteSpace:'nowrap'}}>{r.ref_no}</td>
+                          <td style={{padding:'3px 6px',maxWidth:100,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.supplier_name}</td>
+                          <td style={{padding:'3px 6px',textAlign:'right'}}>{fmtBhd(r.net_amount)}</td>
+                          <td style={{padding:'3px 6px',textAlign:'right',fontWeight:600}}>{fmtBhd(r.vat_amount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {isLoading && <div style={{textAlign:'center',padding:30,color:'#aaa'}}>Loading VAT data…</div>}
+      </div>
+    </div>
+  )
+}
+
 const Card = ({ label, value, sub, color, onClick }) => (
   <div onClick={onClick} style={{
     background:'#fff', border:'1px solid #d0d0d0', borderTop:`3px solid ${color}`,
@@ -64,6 +225,7 @@ export default function FinanceModule() {
   const [cfCustomFrom,       setCfCustomFrom]       = useState('')
   const [cfCustomTo,         setCfCustomTo]         = useState('')
   const [selectedAgingBucket, setSelectedAgingBucket] = useState(null)
+  const [apExpanded,         setApExpanded]         = useState(null)
 
   // Due-date ranges for aging drill-down
   const daysAgo = n => new Date(Date.now() - n*864e5).toISOString().split('T')[0]
@@ -77,6 +239,7 @@ export default function FinanceModule() {
   const { data: sumData } = useQuery({ queryKey:['fin-summary'], queryFn:()=>chequeApi.summary().then(r=>r.data.data) })
   const { data: chqData } = useQuery({ queryKey:['cheques-upcoming'], queryFn:()=>chequeApi.list({direction:'issued',status:'pending'}).then(r=>r.data.data) })
   const { data: overdueData } = useQuery({ queryKey:['overdue-rpt'], queryFn:()=>reportApi.overdue().then(r=>r.data) })
+  const { data: apAgingData } = useQuery({ queryKey:['ap-aging'], queryFn:()=>reportApi.apAging().then(r=>r.data.data) })
 
   const ageDrillParams = selectedAgingBucket ? { ...ageDates[selectedAgingBucket], type:'tax_invoice', status:'unpaid,partial,overdue', limit:100 } : null
   const { data: ageDrillData, isLoading: ageDrillLoading } = useQuery({
@@ -364,6 +527,86 @@ export default function FinanceModule() {
           </div>
         </div>
       </div>
+
+      {/* AP Aging */}
+      {apAgingData && (
+        <div style={{padding:'0 12px 9px'}}>
+          <div style={{background:'#fff',border:'1px solid #d0d0d0',borderRadius:3,padding:14}}>
+            <div style={{fontWeight:600,fontSize:12,marginBottom:10,paddingBottom:6,borderBottom:'1px solid #eee',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <span>Accounts Payable Aging</span>
+              <span style={{fontSize:11,color:'#aaa',fontWeight:400}}>Unpaid &amp; partial purchases by supplier</span>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:6,marginBottom:10}}>
+              {[
+                { label:'Current',       key:'current',  color:'#2e7d32' },
+                { label:'1–30d overdue', key:'b1_30',    color:'#f57c00' },
+                { label:'31–60d',        key:'b31_60',   color:'#e65100' },
+                { label:'61–90d',        key:'b61_90',   color:'#c62828' },
+                { label:'90d+',          key:'b90plus',  color:'#7b1fa2' },
+              ].map(({label,key,color})=>(
+                <div key={key} style={{background:'#f9f9f9',border:`2px solid ${color}22`,borderTop:`3px solid ${color}`,borderRadius:3,padding:'6px 10px',textAlign:'center'}}>
+                  <div style={{fontSize:10,color:'#888',marginBottom:3}}>{label}</div>
+                  <div style={{fontSize:14,fontWeight:700,color}}>BHD {fmtBhd(apAgingData.summary?.[key]||0)}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:'flex',justifyContent:'flex-end',fontSize:12,fontWeight:700,color:'#e65100',marginBottom:8}}>
+              Total AP: BHD {fmtBhd(apAgingData.summary?.total||0)}
+            </div>
+            {(apAgingData.suppliers||[]).length > 0 && (
+              <div style={{border:'1px solid #e0e0e0',borderRadius:3,overflow:'auto',maxHeight:200}}>
+                <table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}>
+                  <thead><tr style={{background:'#f5f5f5',position:'sticky',top:0}}>
+                    <th style={{padding:'4px 8px',textAlign:'left'}}>Supplier</th>
+                    <th style={{padding:'4px 8px',textAlign:'right'}}>Current</th>
+                    <th style={{padding:'4px 8px',textAlign:'right',color:'#f57c00'}}>1–30d</th>
+                    <th style={{padding:'4px 8px',textAlign:'right',color:'#e65100'}}>31–60d</th>
+                    <th style={{padding:'4px 8px',textAlign:'right',color:'#c62828'}}>61–90d</th>
+                    <th style={{padding:'4px 8px',textAlign:'right',color:'#7b1fa2'}}>90d+</th>
+                    <th style={{padding:'4px 8px',textAlign:'right',fontWeight:700}}>Total</th>
+                    <th style={{padding:'4px 8px',textAlign:'center'}}></th>
+                  </tr></thead>
+                  <tbody>
+                    {(apAgingData.suppliers||[]).map((s,i)=>(
+                      <>
+                        <tr key={s.supplier_id} style={{borderBottom:'1px solid #f0f0f0',background:i%2?'#fafafa':'#fff',cursor:'pointer'}}
+                          onClick={()=>setApExpanded(apExpanded===s.supplier_id?null:s.supplier_id)}>
+                          <td style={{padding:'4px 8px',fontWeight:600}}>{s.supplier_name}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',color:'#2e7d32'}}>{s.current>0?fmtBhd(s.current):'—'}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',color:'#f57c00'}}>{s.b1_30>0?fmtBhd(s.b1_30):'—'}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',color:'#e65100'}}>{s.b31_60>0?fmtBhd(s.b31_60):'—'}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',color:'#c62828'}}>{s.b61_90>0?fmtBhd(s.b61_90):'—'}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',color:'#7b1fa2'}}>{s.b90plus>0?fmtBhd(s.b90plus):'—'}</td>
+                          <td style={{padding:'4px 8px',textAlign:'right',fontWeight:700}}>{fmtBhd(s.total)}</td>
+                          <td style={{padding:'4px 8px',textAlign:'center',color:'var(--blue)',fontSize:10}}>{apExpanded===s.supplier_id?'▲':'▼'}</td>
+                        </tr>
+                        {apExpanded===s.supplier_id && (s.purchases||[]).map(p=>(
+                          <tr key={p.id} style={{background:'#f0f7ff',borderBottom:'1px solid #e0e0e0'}}>
+                            <td style={{padding:'3px 8px 3px 20px',fontSize:10,color:'var(--blue)'}}>{p.purchase_no}</td>
+                            <td colSpan={5} style={{padding:'3px 8px',fontSize:10,color:'#666'}}>
+                              Due: {fmtDate(p.due_date)}
+                              {p.supplier_invoice_no && ` · Supplier Inv: ${p.supplier_invoice_no}`}
+                              {p.days_overdue > 0 && <span style={{color:'#c62828',marginLeft:6}}>{p.days_overdue}d overdue</span>}
+                            </td>
+                            <td style={{padding:'3px 8px',textAlign:'right',fontSize:10,fontWeight:600}}>{fmtBhd(p.balance_due)}</td>
+                            <td/>
+                          </tr>
+                        ))}
+                      </>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {(apAgingData.suppliers||[]).length === 0 && (
+              <div style={{textAlign:'center',padding:'12px 0',color:'#aaa',fontSize:12}}>No outstanding payables</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* VAT Return */}
+      <VatReturnPanel />
 
       {/* Overdue invoices */}
       <div style={{padding:'0 12px 12px'}}>

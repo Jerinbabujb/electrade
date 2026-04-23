@@ -1020,12 +1020,16 @@ export default function ProductsModule() {
             <th style={{width:28}}><input type="checkbox"/></th>
             <th>SKU / Part No.</th><th>Description</th><th>Type</th><th>Brand</th><th>Category</th>
             <th>Unit</th><th>Voltage</th>
-            <th className="right">Cost BHD</th><th className="right">Price 1</th><th className="right">Price 2</th>
-            <th className="right">Stock</th><th>Status</th>
+            <th className="right">Cost BHD</th><th className="right">Price 1</th>
+            <th className="right" title="Gross margin based on Price 1 vs Cost">Margin %</th>
+            <th className="right" title="Units sold in last 30 days">30d Sales</th>
+            <th className="right">Stock</th>
+            <th title="Date of last completed physical count">Last Count</th>
+            <th>Status</th>
           </tr></thead>
           <tbody>
-            {isLoading&&<tr className="empty-row"><td colSpan={13}>Loading...</td></tr>}
-            {!isLoading&&!rows.length&&<tr className="empty-row"><td colSpan={13}>No products found</td></tr>}
+            {isLoading&&<tr className="empty-row"><td colSpan={15}>Loading...</td></tr>}
+            {!isLoading&&!rows.length&&<tr className="empty-row"><td colSpan={15}>No products found</td></tr>}
             {rows.map(p=>{
               const isLow = parseFloat(p.stock_qty)<=parseFloat(p.stock_min)
               const isOut = parseFloat(p.stock_qty)<=0
@@ -1033,6 +1037,19 @@ export default function ProductsModule() {
               const typeLabel = ptype==='service' ? { label:'⚙ Service', color:'#2e7d32', bg:'#e8f5e9' }
                               : ptype==='non_stock' ? { label:'🛒 Non-Stock', color:'#e65100', bg:'#fff3e0' }
                               : null
+              // Margin %
+              const cost = parseFloat(p.cost_price||0), price = parseFloat(p.price_1||0)
+              const margin = price > 0 ? ((price - cost) / price * 100) : null
+              const marginColor = margin === null ? '#aaa' : margin < 10 ? '#c62828' : margin < 25 ? '#e65100' : '#2e7d32'
+              // Last count age
+              const lastCount = p.last_counted_at ? new Date(p.last_counted_at) : null
+              const daysSinceCount = lastCount ? Math.floor((Date.now() - lastCount) / 864e5) : null
+              const countColor = daysSinceCount === null ? '#c62828'
+                               : daysSinceCount > 90 ? '#e65100'
+                               : '#2e7d32'
+              const countLabel = lastCount
+                ? lastCount.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'2-digit' })
+                : 'Never'
               return (
                 <tr key={p.id} className={selectedId===p.id?'selected':''} onClick={()=>setSelectedId(p.id)} onDoubleClick={()=>{setSelectedId(p.id);openEdit()}}>
                   <td><input type="checkbox" checked={selectedId===p.id} onChange={()=>setSelectedId(p.id)}/></td>
@@ -1048,9 +1065,18 @@ export default function ProductsModule() {
                   <td>{p.voltage_rating||'—'}</td>
                   <td className="right">{fmtBhd(p.cost_price)}</td>
                   <td className="right">{fmtBhd(p.price_1)}</td>
-                  <td className="right">{fmtBhd(p.price_2)}</td>
+                  <td className="right" style={{fontWeight:600,color:marginColor}}>
+                    {ptype==='stock'&&margin!==null ? `${margin.toFixed(1)}%` : '—'}
+                  </td>
+                  <td className="right" style={{color: parseFloat(p.sold_30d||0)>0 ? '#1565c0' : '#bbb', fontWeight: parseFloat(p.sold_30d||0)>0 ? 600 : 400}}>
+                    {ptype==='stock' ? (parseFloat(p.sold_30d||0)>0 ? parseFloat(p.sold_30d).toFixed(0) : '—') : '—'}
+                  </td>
                   <td className="right" style={{fontWeight:600,color:isOut?'#c62828':isLow?'#e65100':'#2e7d32'}}>
                     {ptype==='stock' ? p.stock_qty : '—'}
+                  </td>
+                  <td style={{fontSize:11, color:countColor, whiteSpace:'nowrap', fontWeight: daysSinceCount===null?700:400}}>
+                    {ptype==='stock' ? countLabel : '—'}
+                    {ptype==='stock'&&daysSinceCount!==null&&<span style={{color:'#aaa',marginLeft:3}}>({daysSinceCount}d)</span>}
                   </td>
                   <td>
                     {ptype==='service' ? <span className="badge" style={{background:'#e8f5e9',color:'#2e7d32',border:'1px solid #a5d6a7'}}>Service</span>

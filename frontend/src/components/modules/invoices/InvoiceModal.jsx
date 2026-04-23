@@ -373,6 +373,18 @@ export default function InvoiceModal() {
       qc.invalidateQueries(['quotations'])
       closeModal('invoice')
     },
+    onError: (err) => {
+      const data = err.response?.data?.error
+      if (data?.code === 'CREDIT_LIMIT_EXCEEDED') {
+        const msg = `Credit limit exceeded for this customer.\n\nLimit: BHD ${data.credit_limit?.toFixed(3)}\nCurrent balance: BHD ${data.current_balance?.toFixed(3)}\nThis invoice: BHD ${data.new_invoice_total?.toFixed(3)}\n\nProceed anyway?`
+        if (window.confirm(msg)) {
+          // Retry with force_credit flag
+          const lastPayload = saveMut.variables
+          saveMut.mutate({ ...lastPayload, force_credit: true })
+        }
+      }
+      // Other errors are handled by the global 401/toast interceptor
+    },
   })
 
   const issueMut = useMutation({

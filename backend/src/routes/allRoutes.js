@@ -184,8 +184,35 @@ module.exports.productsRouter = (() => {
       if (category_id) { params.push(category_id); where.push(`p.category_id = $${params.length}`) }
       if (low_stock === 'true') where.push(`p.stock_qty <= p.stock_min`)
       const { rows } = await db.query(
-        `SELECT p.*, cat.name AS category_name FROM products p
+        `SELECT p.*, cat.name AS category_name,
+                lc.last_counted_at,
+                COALESCE(v30.sold_qty, 0) AS sold_30d,
+                COALESCE(v90.sold_qty, 0) AS sold_90d
+         FROM products p
          LEFT JOIN categories cat ON cat.id = p.category_id
+         LEFT JOIN (
+           SELECT scsi.product_id,
+                  MAX(GREATEST(COALESCE(scsi.counted_at, scs.completed_at))) AS last_counted_at
+           FROM stock_count_session_items scsi
+           JOIN stock_count_sessions scs
+             ON scs.id = scsi.session_id AND scs.company_id = $1 AND scs.status = 'complete'
+           WHERE scsi.physical_qty IS NOT NULL
+           GROUP BY scsi.product_id
+         ) lc ON lc.product_id = p.id
+         LEFT JOIN (
+           SELECT product_id, SUM(ABS(qty)) AS sold_qty
+           FROM stock_movements
+           WHERE movement_type = 'sale' AND company_id = $1
+             AND created_at >= NOW() - INTERVAL '30 days'
+           GROUP BY product_id
+         ) v30 ON v30.product_id = p.id
+         LEFT JOIN (
+           SELECT product_id, SUM(ABS(qty)) AS sold_qty
+           FROM stock_movements
+           WHERE movement_type = 'sale' AND company_id = $1
+             AND created_at >= NOW() - INTERVAL '90 days'
+           GROUP BY product_id
+         ) v90 ON v90.product_id = p.id
          WHERE ${where.join(' AND ')} ORDER BY cat.name, p.name`, params)
       res.json({ data: rows })
     } catch (err) { next(err) }
