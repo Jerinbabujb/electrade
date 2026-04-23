@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { chequeApi } from '../../../services/api'
+import { chequeApi, bankApi } from '../../../services/api'
 import CustomerTypeahead from '../shared/CustomerTypeahead'
 import { fmtBhd, fmtDate } from '../../../utils/format'
 import toast from 'react-hot-toast'
@@ -13,7 +13,7 @@ const STATUS_COLORS = {
 }
 
 const empty = {
-  direction:'issued', cheque_no:'', bank_name:'', party_id:'', party_name:'',
+  direction:'issued', cheque_no:'', bank_account_id:'', bank_name:'', party_id:'', party_name:'',
   amount:'', cheque_date:'', issue_date:new Date().toISOString().split('T')[0],
   purchase_id:'', invoice_id:'', notes:'',
 }
@@ -212,6 +212,11 @@ export default function ChequesModule() {
     queryKey: ['cheques', filters],
     queryFn:  () => chequeApi.list(filters).then(r => r.data.data)
   })
+
+  const { data: bankAccounts } = useQuery({
+    queryKey: ['bank-accounts'],
+    queryFn:  () => bankApi.accounts().then(r => r.data.data),
+  })
   const rows = data || []
   const sel  = rows.find(r => r.id === selectedId)
 
@@ -382,7 +387,36 @@ export default function ChequesModule() {
                 <div className="field"><label>Cheque No. *</label><input value={form.cheque_no} onChange={e=>F('cheque_no',e.target.value)} placeholder="e.g. 000123" autoFocus/></div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
-                <div className="field"><label>Bank Name</label><input value={form.bank_name} onChange={e=>F('bank_name',e.target.value)} placeholder="e.g. BBK, Ahli United"/></div>
+                <div className="field">
+                  <label>Bank Account {form.direction==='issued' ? '*' : ''}</label>
+                  {form.direction === 'issued' ? (
+                    (bankAccounts||[]).length > 0 ? (
+                      <select value={form.bank_account_id}
+                        onChange={e => {
+                          const acct = (bankAccounts||[]).find(a => a.id === e.target.value)
+                          F('bank_account_id', e.target.value)
+                          F('bank_name', acct ? acct.bank_name : '')
+                        }}>
+                        <option value="">— Select bank account —</option>
+                        {(bankAccounts||[]).map(a => (
+                          <option key={a.id} value={a.id}>
+                            {a.bank_name} — {a.iban || a.account_number || a.account_name}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div style={{fontSize:11,color:'#c62828',padding:'4px 0'}}>
+                        No bank accounts set up. <a href="#" style={{color:'var(--blue)'}}
+                          onClick={e=>{e.preventDefault();setShowForm(false);toast('Go to Bank Reconciliation → ＋ Add Account')}}>
+                          Add one in Bank Reconciliation first.
+                        </a>
+                      </div>
+                    )
+                  ) : (
+                    <input value={form.bank_name} onChange={e=>F('bank_name',e.target.value)}
+                      placeholder="e.g. NBB, BBK (drawee's bank)"/>
+                  )}
+                </div>
                 <div className="field"><label>Amount BHD *</label><input type="number" step="0.001" min="0" value={form.amount} onChange={e=>F('amount',e.target.value)}/></div>
               </div>
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>

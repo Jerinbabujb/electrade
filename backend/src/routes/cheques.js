@@ -220,13 +220,25 @@ router.get('/summary', async (req, res, next) => {
 // Create cheque
 router.post('/', authorize('admin','accountant','sales'), async (req, res, next) => {
   try {
-    const { cheque_no, bank_name, direction, party_id, party_name,
+    const { cheque_no, bank_name, bank_account_id, direction, party_id, party_name,
             amount, cheque_date, issue_date, purchase_id, invoice_id, notes } = req.body;
+
+    // Resolve bank_name from bank_account_id if provided (issued cheques)
+    let resolvedBankName = bank_name || null;
+    let resolvedAccountId = bank_account_id || null;
+    if (bank_account_id) {
+      const { rows: [acct] } = await db.query(
+        `SELECT bank_name FROM bank_accounts WHERE id=$1 AND company_id=$2`,
+        [bank_account_id, req.user.company_id]);
+      if (acct) resolvedBankName = acct.bank_name;
+      else resolvedAccountId = null;  // invalid account, ignore silently
+    }
+
     const { rows: [row] } = await db.query(
-      `INSERT INTO cheques (id,company_id,cheque_no,bank_name,direction,party_id,party_name,
-         amount,cheque_date,issue_date,purchase_id,invoice_id,notes,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-      [uuid(), req.user.company_id, cheque_no, bank_name||null, direction,
+      `INSERT INTO cheques (id,company_id,cheque_no,bank_name,bank_account_id,direction,
+         party_id,party_name,amount,cheque_date,issue_date,purchase_id,invoice_id,notes,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      [uuid(), req.user.company_id, cheque_no, resolvedBankName, resolvedAccountId, direction,
        party_id||null, party_name||null, amount, cheque_date,
        issue_date || new Date().toISOString().split('T')[0],
        purchase_id||null, invoice_id||null, notes||null, req.user.id]
