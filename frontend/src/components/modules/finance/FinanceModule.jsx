@@ -60,8 +60,8 @@ function VatReturnPanel() {
               <Row label="Input VAT (Purchases)" value={data.input_vat?.total_vat} color="#2e7d32"/>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',padding:'10px 0 4px',borderTop:'2px solid #333',marginTop:4}}>
                 <span style={{fontSize:13,fontWeight:700}}>Net VAT Payable</span>
-                <span style={{fontSize:18,fontWeight:700,color: parseFloat(data.summary?.net_vat||0)>0?'#c62828':'#2e7d32'}}>
-                  BHD {fmtBhd(data.summary?.net_vat||0)}
+                <span style={{fontSize:18,fontWeight:700,color: parseFloat(data.summary?.net_vat_payable||0)>0?'#c62828':'#2e7d32'}}>
+                  BHD {fmtBhd(data.summary?.net_vat_payable||0)}
                 </span>
               </div>
               <div style={{fontSize:10,color:'#888',marginTop:4}}>
