@@ -1055,10 +1055,12 @@ module.exports.bankRouter = (() => {
          WHERE bt.id = $2`,
         [req.user.company_id, req.params.id])
       if (!tx) return res.status(404).json({ error: { message: 'Transaction not found' } })
+      // When ref_type is null the caller is unmatching — revert to unmatched
+      const newStatus = ref_type ? 'manually_matched' : 'unmatched'
       await db.query(
-        `UPDATE bank_transactions SET match_status='manually_matched', ref_type=$1, ref_id=$2, ref_no=$3 WHERE id=$4`,
-        [ref_type, ref_id, ref_no, req.params.id])
-      res.json({ message: 'Transaction manually matched' })
+        `UPDATE bank_transactions SET match_status=$1, ref_type=$2, ref_id=$3, ref_no=$4 WHERE id=$5`,
+        [newStatus, ref_type||null, ref_id||null, ref_no||null, req.params.id])
+      res.json({ message: ref_type ? 'Transaction manually matched' : 'Transaction unmatched' })
     } catch (err) { next(err) }
   })
 
