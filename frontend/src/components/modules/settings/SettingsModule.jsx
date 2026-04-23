@@ -854,6 +854,11 @@ export default function SettingsModule() {
     onSuccess: ()=>{ toast.success('User created'); qc.invalidateQueries(['users']); setNewUser({name:'',email:'',password:'',role:'sales'}) }
   })
 
+  const forceLogoutMut = useMutation({
+    mutationFn: (id) => authApi.forceLogout(id),
+    onSuccess: (_,id) => { toast.success('User sessions terminated'); qc.invalidateQueries(['users']) }
+  })
+
   return (
     <div style={{display:'flex',flexDirection:'column',flex:1,overflow:'hidden'}}>
       <div className="module-title">Settings</div>
@@ -1074,21 +1079,49 @@ export default function SettingsModule() {
         )}
 
         {tab==='users'&&(
-          <div style={{maxWidth:680}}>
+          <div style={{maxWidth:780}}>
             <div style={{fontSize:13,fontWeight:700,marginBottom:10,color:'#333'}}>System Users</div>
             <table className="data-table" style={{marginBottom:16,fontSize:12}}>
-              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th>Status</th>{user?.role==='admin'&&<th></th>}</tr></thead>
+              <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Last Login</th><th>Account</th><th>Session</th>{user?.role==='admin'&&<th></th>}</tr></thead>
               <tbody>
-                {(usersData||[]).map(u=>(
-                  <tr key={u.id}>
-                    <td style={{fontWeight:600}}>{u.name}</td>
-                    <td>{u.email}</td>
-                    <td><span style={{padding:'1px 7px',background:'var(--blue-light)',borderRadius:10,fontSize:11,color:'var(--blue)'}}>{u.role}</span></td>
-                    <td style={{color:'#888'}}>{u.last_login?new Date(u.last_login).toLocaleDateString():'Never'}</td>
-                    <td><span className={`badge ${u.is_active?'badge-paid':'badge-cancelled'}`}>{u.is_active?'Active':'Inactive'}</span></td>
-                    {user?.role==='admin'&&<td><button className="btn" style={{fontSize:11,padding:'2px 8px'}} onClick={()=>setEditingUser(u)}>✏️ Edit</button></td>}
-                  </tr>
-                ))}
+                {(usersData||[]).map(u=>{
+                  const lastLogin = u.last_login ? new Date(u.last_login) : null
+                  const sessionActive = lastLogin && (Date.now() - lastLogin.getTime()) < 12*60*60*1000
+                  const fmtLogin = lastLogin
+                    ? lastLogin.toLocaleDateString() + ' ' + lastLogin.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})
+                    : 'Never'
+                  return (
+                    <tr key={u.id}>
+                      <td style={{fontWeight:600}}>{u.name}{u.id===user?.id&&<span style={{marginLeft:5,fontSize:10,color:'#888'}}>(you)</span>}</td>
+                      <td>{u.email}</td>
+                      <td><span style={{padding:'1px 7px',background:'var(--blue-light)',borderRadius:10,fontSize:11,color:'var(--blue)'}}>{u.role}</span></td>
+                      <td style={{color:'#888',whiteSpace:'nowrap'}}>{fmtLogin}</td>
+                      <td><span className={`badge ${u.is_active?'badge-paid':'badge-cancelled'}`}>{u.is_active?'Active':'Inactive'}</span></td>
+                      <td>
+                        {u.is_active
+                          ? <span style={{padding:'1px 7px',borderRadius:10,fontSize:11,fontWeight:600,
+                              background: sessionActive?'#e8f5e9':'#f5f5f5',
+                              color: sessionActive?'#2e7d32':'#999'}}>
+                              {sessionActive ? 'Online' : 'Offline'}
+                            </span>
+                          : <span style={{color:'#bbb',fontSize:11}}>—</span>
+                        }
+                      </td>
+                      {user?.role==='admin'&&(
+                        <td style={{whiteSpace:'nowrap',display:'flex',gap:4}}>
+                          <button className="btn" style={{fontSize:11,padding:'2px 8px'}} onClick={()=>setEditingUser(u)}>✏️ Edit</button>
+                          {u.id!==user?.id&&u.is_active&&(
+                            <button className="btn" style={{fontSize:11,padding:'2px 8px',color:'#c62828',borderColor:'#ef9a9a'}}
+                              onClick={()=>{ if(window.confirm(`Force-logout ${u.name}? All active sessions will be terminated.`)) forceLogoutMut.mutate(u.id) }}
+                              disabled={forceLogoutMut.isPending}>
+                              Logout
+                            </button>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
             {editingUser && <EditUserModal u={editingUser} onClose={()=>setEditingUser(null)} />}

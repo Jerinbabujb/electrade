@@ -4,8 +4,8 @@ const jwt     = require('jsonwebtoken')
 const { v4: uuid } = require('uuid')
 const audit   = require('../utils/auditLog')
 
-const sign = ({ id, company_id, role, name }) =>
-  jwt.sign({ id, company_id, role, name }, process.env.JWT_SECRET, { expiresIn: '12h' })
+const sign = ({ id, company_id, role, name, token_version }) =>
+  jwt.sign({ id, company_id, role, name, token_version: token_version || 0 }, process.env.JWT_SECRET, { expiresIn: '12h' })
 
 // Fetch all companies a user belongs to (ordered: default first, then alpha)
 const getUserCompanies = (userId) =>
@@ -51,7 +51,7 @@ exports.login = async (req, res, next) => {
 
     await db.query(`UPDATE users SET last_login = now() WHERE id = $1`, [user.id])
 
-    const token = sign({ id: user.id, company_id: activeCompany.id, role: activeRole, name: user.name })
+    const token = sign({ id: user.id, company_id: activeCompany.id, role: activeRole, name: user.name, token_version: user.token_version || 0 })
 
     res.json({
       token,
@@ -89,9 +89,9 @@ exports.switchCompany = async (req, res, next) => {
       return res.status(403).json({ error: { message: 'No access to this company' } })
 
     const { rows: [user] } = await db.query(
-      `SELECT id, name, email FROM users WHERE id = $1`, [req.user.id])
+      `SELECT id, name, email, token_version FROM users WHERE id = $1`, [req.user.id])
 
-    const token     = sign({ id: user.id, company_id: uc.id, role: uc.role, name: user.name })
+    const token     = sign({ id: user.id, company_id: uc.id, role: uc.role, name: user.name, token_version: user.token_version || 0 })
     const companies = await getUserCompanies(user.id)
 
     await audit.log(db, req, 'auth.company_switch', 'company', uc.id, uc.name,
@@ -243,6 +243,33 @@ exports.changePassword = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+// POST /api/v1/auth/users/:id/force-logout  (admin only)
+exports.forceLogout = async (req, res, next) => {
+  try {
+    // Verify target belongs to this company
+    const { rows: [check] } = await db.query(
+      `SELECT u.name FROM user_companies uc
+       JOIN users u ON u.id = uc.user_id
+       WHERE uc.user_id = $1 AND uc.company_id = $2`,
+      [req.params.id, req.user.company_id])
+    if (!check) return res.status(404).json({ error: { message: 'User not found' } })
+
+    // Prevent an admin from force-logging-out themselves
+    if (req.params.id === req.user.id)
+      return res.status(400).json({ error: { message: 'Cannot force-logout yourself' } })
+
+    await db.query(
+      `UPDATE users SET token_version = token_version + 1 WHERE id = $1`,
+      [req.params.id])
+
+    const { invalidateAuthCache } = require('../middleware/auth')
+    invalidateAuthCache(req.params.id)
+
+    await audit.log(db, req, 'user.force_logout', 'user', req.params.id, check.name)
+    res.json({ message: 'User sessions terminated' })
+  } catch (err) { next(err) }
+}
+
 // ── Invite flow ────────────────────────────────────────────────────────────────
 
 // GET /api/v1/auth/accept-invite/:token  — public, returns invite metadata
@@ -321,7 +348,9 @@ exports.acceptInvite = async (req, res, next) => {
     // Issue a token so they're logged in immediately
     const companies = await getUserCompanies(user.id)
     const activeCompany = companies.find(c => c.id === inv.company_id) || companies[0]
-    const token = sign({ id: user.id, company_id: inv.company_id, role: inv.role, name: user.name })
+    const { rows: [userWithVer] } = await db.query(
+      `SELECT token_version FROM users WHERE id = $1`, [user.id])
+    const token = sign({ id: user.id, company_id: inv.company_id, role: inv.role, name: user.name, token_version: userWithVer?.token_version || 0 })
 
     res.json({
       token,

@@ -5,18 +5,18 @@ const db  = require('../db');
 // Avoids a DB round-trip on every authenticated request for the common case
 // where the user's membership hasn't changed.  TTL = 30 s.  Invalidated
 // explicitly whenever role or membership changes (see invalidateAuthCache).
-const _authCache = new Map()  // key: 'userId:companyId' → { role, expiresAt }
+const _authCache = new Map()  // key: 'userId:companyId' → { role, token_version, expiresAt }
 const AUTH_CACHE_TTL = 30_000 // ms
 
 function _getCached(userId, companyId) {
   const entry = _authCache.get(`${userId}:${companyId}`)
   if (!entry) return null
   if (Date.now() > entry.expiresAt) { _authCache.delete(`${userId}:${companyId}`); return null }
-  return entry.role
+  return entry
 }
 
-function _setCached(userId, companyId, role) {
-  _authCache.set(`${userId}:${companyId}`, { role, expiresAt: Date.now() + AUTH_CACHE_TTL })
+function _setCached(userId, companyId, role, token_version) {
+  _authCache.set(`${userId}:${companyId}`, { role, token_version, expiresAt: Date.now() + AUTH_CACHE_TTL })
 }
 
 // Exported so other modules (user management, company routes) can evict stale entries
@@ -43,21 +43,30 @@ const authenticate = async (req, res, next) => {
     return res.status(401).json({ error: { message: 'Invalid or expired token' } });
   }
 
-  // Re-verify company membership — uses a 30 s in-process cache to avoid a
-  // DB hit on every request while still catching revocations promptly.
+  // Re-verify company membership and token_version — uses a 30 s in-process
+  // cache to avoid a DB hit on every request while still catching revocations
+  // and force-logouts promptly.
   try {
-    let role = _getCached(req.user.id, req.user.company_id)
-    if (role === null) {
+    let cached = _getCached(req.user.id, req.user.company_id)
+    if (cached === null) {
       const { rows: [uc] } = await db.query(
-        `SELECT role FROM user_companies WHERE user_id=$1 AND company_id=$2`,
+        `SELECT uc.role, u.token_version
+         FROM user_companies uc
+         JOIN users u ON u.id = uc.user_id
+         WHERE uc.user_id=$1 AND uc.company_id=$2`,
         [req.user.id, req.user.company_id]);
       if (!uc) {
         return res.status(401).json({ error: { message: 'Access to this company has been revoked' } });
       }
-      role = uc.role
-      _setCached(req.user.id, req.user.company_id, role)
+      cached = { role: uc.role, token_version: uc.token_version }
+      _setCached(req.user.id, req.user.company_id, uc.role, uc.token_version)
     }
-    req.user.role = role;
+    // If token_version in JWT is behind the DB value, the user has been force-logged out
+    const jwtVersion = req.user.token_version ?? 0
+    if (jwtVersion < cached.token_version) {
+      return res.status(401).json({ error: { message: 'Session has been terminated' } });
+    }
+    req.user.role = cached.role;
   } catch (err) {
     return next(err);
   }

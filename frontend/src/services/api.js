@@ -365,6 +365,7 @@ export const authApi = {
   listUsers:     ()            => api.get('/auth/users'),
   createUser:    (data)        => api.post('/auth/users', data),
   updateUser:    (id, data)    => api.put(`/auth/users/${id}`, data),
+  forceLogout:   (id)          => api.post(`/auth/users/${id}/force-logout`),
 }
 
 export default api
