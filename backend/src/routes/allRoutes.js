@@ -202,14 +202,14 @@ module.exports.productsRouter = (() => {
          LEFT JOIN (
            SELECT product_id, SUM(ABS(qty)) AS sold_qty
            FROM stock_movements
-           WHERE movement_type = 'sale' AND company_id = $1
+           WHERE movement_type IN ('dn_out','invoice_out') AND company_id = $1
              AND created_at >= NOW() - INTERVAL '30 days'
            GROUP BY product_id
          ) v30 ON v30.product_id = p.id
          LEFT JOIN (
            SELECT product_id, SUM(ABS(qty)) AS sold_qty
            FROM stock_movements
-           WHERE movement_type = 'sale' AND company_id = $1
+           WHERE movement_type IN ('dn_out','invoice_out') AND company_id = $1
              AND created_at >= NOW() - INTERVAL '90 days'
            GROUP BY product_id
          ) v90 ON v90.product_id = p.id
