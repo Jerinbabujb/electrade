@@ -5,90 +5,90 @@ import api from '../../services/api'
 import { Toaster } from 'react-hot-toast'
 import { applyTheme } from '../../utils/theme.js'
 
-import Dashboard        from '../modules/dashboard/Dashboard'
-import InvoicesModule   from '../modules/invoices/InvoicesModule'
-import DNModule         from '../modules/delivery-notes/DNModule'
-import ProductsModule   from '../modules/products/ProductsModule'
-import CustomersModule  from '../modules/customers/CustomersModule'
-import ReportsModule    from '../modules/reports/ReportsModule'
-import PurchasesModule   from '../modules/purchases/PurchasesModule'
-import ShipmentsModule  from '../modules/shipments/ShipmentsModule'
-import ExpensesModule   from '../modules/expenses/ExpensesModule'
-import BankModule       from '../modules/bank/BankModule'
-import SettingsModule   from '../modules/settings/SettingsModule'
+import Dashboard from '../modules/dashboard/Dashboard'
+import InvoicesModule from '../modules/invoices/InvoicesModule'
+import DNModule from '../modules/delivery-notes/DNModule'
+import ProductsModule from '../modules/products/ProductsModule'
+import CustomersModule from '../modules/customers/CustomersModule'
+import ReportsModule from '../modules/reports/ReportsModule'
+import PurchasesModule from '../modules/purchases/PurchasesModule'
+import ShipmentsModule from '../modules/shipments/ShipmentsModule'
+import ExpensesModule from '../modules/expenses/ExpensesModule'
+import BankModule from '../modules/bank/BankModule'
+import SettingsModule from '../modules/settings/SettingsModule'
 import QuotationsModule from '../modules/quotations/QuotationsModule'
-import ChequesModule    from '../modules/cheques/ChequesModule'
-import FinanceModule    from '../modules/finance/FinanceModule'
-import HRModule         from '../modules/hr/HRModule'
-import TasksModule      from '../modules/tasks/TasksModule'
-import CRMModule        from '../modules/crm/CRMModule'
-import POModule         from '../modules/purchases/POModule'
-import SuppliersModule  from '../modules/suppliers/SuppliersModule'
-import ContraModule     from '../modules/contra/ContraModule'
+import ChequesModule from '../modules/cheques/ChequesModule'
+import FinanceModule from '../modules/finance/FinanceModule'
+import HRModule from '../modules/hr/HRModule'
+import TasksModule from '../modules/tasks/TasksModule'
+import CRMModule from '../modules/crm/CRMModule'
+import POModule from '../modules/purchases/POModule'
+import SuppliersModule from '../modules/suppliers/SuppliersModule'
+import ContraModule from '../modules/contra/ContraModule'
 import AnalyticsModule from '../modules/analytics/AnalyticsModule'
 
 // roles: which roles can see this item (omit = all roles)
 // toggleable: whether admin can hide it per-company (core items are always shown)
 const NAV = [
   { section: 'Sales' },
-  { id: 'quotations',      label: 'Quotations',        icon: '📋', roles: ['admin','sales'],                          toggleable: true },
-  { id: 'dns',             label: 'Delivery Notes',    icon: '🚚', roles: ['admin','sales','storekeeper'],            toggleable: false },
-  { id: 'invoices',        label: 'Invoices',          icon: '🧾', roles: ['admin','sales','accountant'],             toggleable: false },
+  { id: 'quotations', label: 'Quotations', icon: '📋', roles: ['admin', 'sales'], toggleable: true },
+  { id: 'dns', label: 'Delivery Notes', icon: '🚚', roles: ['admin', 'sales', 'storekeeper'], toggleable: false },
+  { id: 'invoices', label: 'Invoices', icon: '🧾', roles: ['admin', 'sales', 'accountant'], toggleable: false },
   { section: 'Procurement' },
-  { id: 'suppliers',       label: 'Suppliers',         icon: '🏭', roles: ['admin','accountant','storekeeper'],       toggleable: true },
-  { id: 'purchase-orders', label: 'Purchase Orders',   icon: '📝', roles: ['admin','storekeeper'],                   toggleable: true },
-  { id: 'purchases',       label: 'Purchase Invoices', icon: '📥', roles: ['admin','accountant','storekeeper'],       toggleable: true },
-  { id: 'shipments',       label: 'Landed Costs',      icon: '🚢', roles: ['admin','storekeeper'],                   toggleable: true },
-  { id: 'products',        label: 'Products',          icon: '📦', roles: ['admin','sales','storekeeper'],            toggleable: false },
+  { id: 'suppliers', label: 'Suppliers', icon: '🏭', roles: ['admin', 'accountant', 'storekeeper'], toggleable: true },
+  { id: 'purchase-orders', label: 'Purchase Orders', icon: '📝', roles: ['admin', 'storekeeper'], toggleable: true },
+  { id: 'purchases', label: 'Purchase Invoices', icon: '📥', roles: ['admin', 'accountant', 'storekeeper'], toggleable: true },
+  { id: 'shipments', label: 'Landed Costs', icon: '🚢', roles: ['admin', 'storekeeper'], toggleable: true },
+  { id: 'products', label: 'Products', icon: '📦', roles: ['admin', 'sales', 'storekeeper'], toggleable: false },
   { section: 'CRM' },
-  { id: 'crm',             label: 'Pipeline',          icon: '🎯', roles: ['admin','sales'],                         toggleable: true },
-  { id: 'customers',       label: 'Customers',         icon: '👥', roles: ['admin','sales','accountant'],             toggleable: false },
+  { id: 'crm', label: 'Pipeline', icon: '🎯', roles: ['admin', 'sales'], toggleable: true },
+  { id: 'customers', label: 'Customers', icon: '👥', roles: ['admin', 'sales', 'accountant'], toggleable: false },
   { section: 'HR' },
-  { id: 'hr',              label: 'HR & Payroll',      icon: '👤', roles: ['admin'],                                  toggleable: true },
-  { id: 'tasks',           label: 'Tasks',             icon: '✅', roles: ['admin','sales','accountant','storekeeper'], toggleable: true },
+  { id: 'hr', label: 'HR & Payroll', icon: '👤', roles: ['admin'], toggleable: true },
+  { id: 'tasks', label: 'Tasks', icon: '✅', roles: ['admin', 'sales', 'accountant', 'storekeeper'], toggleable: true },
   { section: 'Finance' },
-  { id: 'contra',          label: 'Contra Accounts',   icon: '⚖️', roles: ['admin','accountant'],                    toggleable: true },
-  { id: 'finance',         label: 'Fin. Overview',     icon: '📈', roles: ['admin','accountant'],                    toggleable: true },
-  { id: 'cheques',         label: 'Cheque Register',   icon: '🏷', roles: ['admin','accountant'],                    toggleable: true },
-  { id: 'expenses',        label: 'Expenses',          icon: '💸', roles: ['admin','accountant'],                    toggleable: true },
-  { id: 'bank',            label: 'Bank Recon.',       icon: '🏦', roles: ['admin','accountant'],                    toggleable: true },
+  { id: 'contra', label: 'Contra Accounts', icon: '⚖️', roles: ['admin', 'accountant'], toggleable: true },
+  { id: 'finance', label: 'Fin. Overview', icon: '📈', roles: ['admin', 'accountant'], toggleable: true },
+  { id: 'cheques', label: 'Cheque Register', icon: '🏷', roles: ['admin', 'accountant'], toggleable: true },
+  { id: 'expenses', label: 'Expenses', icon: '💸', roles: ['admin', 'accountant'], toggleable: true },
+  { id: 'bank', label: 'Bank Recon.', icon: '🏦', roles: ['admin', 'accountant'], toggleable: true },
   { section: 'Reports' },
-  { id: 'analytics',       label: 'Analytics',         icon: '🔍', roles: ['admin','sales','accountant'],            toggleable: true },
-  { id: 'reports',         label: 'Reports',           icon: '📊', roles: ['admin','sales','accountant','storekeeper'], toggleable: true },
+  { id: 'analytics', label: 'Analytics', icon: '🔍', roles: ['admin', 'sales', 'accountant'], toggleable: true },
+  { id: 'reports', label: 'Reports', icon: '📊', roles: ['admin', 'sales', 'accountant', 'storekeeper'], toggleable: true },
   { section: null },
-  { id: 'dashboard',       label: 'Dashboard',         icon: '🏠' },
-  { id: 'settings',        label: 'Settings',          icon: '⚙️', roles: ['admin'] },
+  { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
+  { id: 'settings', label: 'Settings', icon: '⚙️', roles: ['admin'] },
 ]
 
 const MODULES = {
-  dashboard:  <Dashboard />,
-  invoices:   <InvoicesModule />,
-  dns:        <DNModule />,
+  dashboard: <Dashboard />,
+  invoices: <InvoicesModule />,
+  dns: <DNModule />,
   quotations: <QuotationsModule />,
-  products:   <ProductsModule />,
-  customers:  <CustomersModule />,
-  suppliers:         <SuppliersModule />,
+  products: <ProductsModule />,
+  customers: <CustomersModule />,
+  suppliers: <SuppliersModule />,
   'purchase-orders': <POModule />,
-  purchases:  <PurchasesModule />,
-  shipments:  <ShipmentsModule />,
-  expenses:   <ExpensesModule />,
-  bank:       <BankModule />,
-  reports:    <ReportsModule />,
-  settings:   <SettingsModule />,
-  cheques:    <ChequesModule />,
-  contra:     <ContraModule />,
-  analytics:  <AnalyticsModule />,
-  finance:    <FinanceModule />,
-  hr:         <HRModule />,
-  tasks:      <TasksModule />,
-  crm:        <CRMModule />,
+  purchases: <PurchasesModule />,
+  shipments: <ShipmentsModule />,
+  expenses: <ExpensesModule />,
+  bank: <BankModule />,
+  reports: <ReportsModule />,
+  settings: <SettingsModule />,
+  cheques: <ChequesModule />,
+  contra: <ContraModule />,
+  analytics: <AnalyticsModule />,
+  finance: <FinanceModule />,
+  hr: <HRModule />,
+  tasks: <TasksModule />,
+  crm: <CRMModule />,
 }
 
 export default function AppShell() {
-  const { activeModule, setModule }           = useUIStore()
+  const { activeModule, setModule } = useUIStore()
   const { user, logout, switchCompany, switching } = useAuthStore()
-  const queryClient                           = useQueryClient()
-  const { data: coData }                      = useQuery({ queryKey: ['company-settings'], queryFn: () => api.get('/companies').then(r => r.data.data) })
+  const queryClient = useQueryClient()
+  const { data: coData } = useQuery({ queryKey: ['company-settings'], queryFn: () => api.get('/companies').then(r => r.data.data) })
   const co = coData || {}
 
   const companies = user?.companies || []
@@ -99,9 +99,9 @@ export default function AppShell() {
   }, [coData?.theme_color])
 
   return (
-    <div style={{ display:'flex', flexDirection:'column', height:'100vh', overflow:'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <Toaster position="top-right" toastOptions={{ duration: 3000, style: { fontSize: '12.5px' } }} />
-
+      <h2> new chnages</h2>
       {/* Title bar */}
       <div style={{
         height: '26px', background: 'var(--blue)',
@@ -166,7 +166,7 @@ export default function AppShell() {
 
           <div style={{ padding: '5px 0', flex: 1 }}>
             {(() => {
-              const role          = user?.role || ''
+              const role = user?.role || ''
               const hiddenModules = co?.hidden_modules || []
 
               // Filter items: skip if role not allowed, or admin has hidden it
@@ -181,11 +181,11 @@ export default function AppShell() {
               const visibleIds = new Set(visible.filter(i => i.id).map(i => i.id))
               const filtered = visible.filter((item, idx) => {
                 if (item.section === undefined) return true           // regular item
-                if (item.section === null)      return true           // separator
+                if (item.section === null) return true           // separator
                 // section header: keep only if at least one following item (until next section) is visible
                 for (let j = idx + 1; j < visible.length; j++) {
                   if (visible[j].section !== undefined) break        // hit next section
-                  if (visibleIds.has(visible[j].id))   return true
+                  if (visibleIds.has(visible[j].id)) return true
                 }
                 return false
               })
@@ -193,8 +193,8 @@ export default function AppShell() {
               return filtered.map((item, i) => {
                 if (item.section !== undefined) {
                   return item.section
-                    ? <div key={i} style={{ padding:'4px 11px 2px', fontSize:10, color:'#777', textTransform:'uppercase', letterSpacing:'.5px', background:'transparent', borderBottom:'1px solid #444' }}>{item.section}</div>
-                    : <div key={i} style={{ height:1, background:'#444', margin:'3px 0' }} />
+                    ? <div key={i} style={{ padding: '4px 11px 2px', fontSize: 10, color: '#777', textTransform: 'uppercase', letterSpacing: '.5px', background: 'transparent', borderBottom: '1px solid #444' }}>{item.section}</div>
+                    : <div key={i} style={{ height: 1, background: '#444', margin: '3px 0' }} />
                 }
                 const active = activeModule === item.id
                 return (
@@ -218,6 +218,7 @@ export default function AppShell() {
             })()}
           </div>
 
+
           {/* Powered by */}
           <div style={{ padding: '8px 10px', borderTop: '1px solid #444', background: '#1a1a1a', textAlign: 'center', flexShrink: 0 }}>
             <div style={{ fontSize: 10, color: '#666', fontWeight: 700, letterSpacing: '0.3px' }}>ElecTrade Pro v1.0</div>
@@ -228,8 +229,8 @@ export default function AppShell() {
         {/* Content */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           {MODULES[activeModule] || (
-            <div style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', flexDirection:'column', gap:8, color:'#888' }}>
-              <div style={{ fontSize:32 }}>🔧</div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 8, color: '#888' }}>
+              <div style={{ fontSize: 32 }}>🔧</div>
               <div>Module not found</div>
             </div>
           )}
