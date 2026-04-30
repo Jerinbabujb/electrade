@@ -101,7 +101,6 @@ export default function AppShell() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       <Toaster position="top-right" toastOptions={{ duration: 3000, style: { fontSize: '12.5px' } }} />
-      <h2> new chnages</h2>
       {/* Title bar */}
       <div style={{
         height: '26px', background: 'var(--blue)',
