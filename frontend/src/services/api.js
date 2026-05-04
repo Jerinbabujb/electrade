@@ -2,14 +2,21 @@ import axios from 'axios'
 import toast from 'react-hot-toast'
 
 
-const API_BASE_URL = import.meta.env.VITE_API_URL 
-  ? `${import.meta.env.VITE_API_URL}/api/v1` 
-  : '/api/v1';
+// This forces the use of the environment variable
+const base = import.meta.env.VITE_API_URL || '';
+// This removes any accidental trailing slashes and ensures we hit /api/v1
+const cleanBase = base.replace(/\/$/, '');
+
+// If cleanBase is empty, it defaults to /api/v1 (which causes your 405 error)
+// This log will help you debug in the browser console
+console.log("Current API Base:", cleanBase ? `${cleanBase}/api/v1` : "WARNING: VITE_API_URL NOT FOUND");
+
+const API_BASE_URL = cleanBase ? `${cleanBase}/api/v1` : '/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
   timeout: 30000,
-})
+});
 
 // Attach JWT on every request
 api.interceptors.request.use(config => {
