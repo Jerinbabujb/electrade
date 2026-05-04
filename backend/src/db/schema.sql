@@ -119,18 +119,6 @@ CREATE TABLE automation_settings (
   updated_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- ============================================================
--- CUSTOMER PORTAL TOKENS
--- ============================================================
-CREATE TABLE customer_portal_tokens (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  token       TEXT UNIQUE NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),
-  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
-  company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(customer_id, company_id)
-);
-CREATE INDEX cpt_token ON customer_portal_tokens(token);
 
 -- ============================================================
 -- INVITE TOKENS (email invitation to join a company)
@@ -187,6 +175,20 @@ CREATE TABLE customers (
 );
 CREATE INDEX idx_cust_company ON customers(company_id);
 CREATE INDEX idx_cust_name    ON customers(company_id, name);
+
+
+-- ============================================================
+-- CUSTOMER PORTAL TOKENS
+-- ============================================================
+CREATE TABLE customer_portal_tokens (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token       TEXT UNIQUE NOT NULL DEFAULT encode(gen_random_bytes(24), 'hex'),
+  customer_id UUID NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+  company_id  UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(customer_id, company_id)
+);
+CREATE INDEX cpt_token ON customer_portal_tokens(token);
 
 -- ============================================================
 -- PRODUCTS
