@@ -15,6 +15,11 @@ const {
 const app = express()
 app.use(helmet())
 app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173' }))
+const cleanOrigin = frontendUrl.replace(/\/$/, '');
+app.use(cors({ 
+  origin: cleanOrigin,
+  credentials: true // Crucial for storing your 'et_token' in some setups
+}));
 app.use(compression())
 // Redact Bearer tokens from logged URLs before they reach morgan
 morgan.token('url-redacted', (req) =>
